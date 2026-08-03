@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "notion",
   "name": "Notion",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Ports agentic-workspace's generic Notion MCP integration into aw-workspace: stores a Notion internal-integration token in the zero-knowledge secret store and generates the mcp.json entry (@notionhq/notion-mcp-server) that MCP Gateway scans, so any agent running in the workspace gets Notion tools through the gateway.",
   "icon": "book-open",
   "tier": "inprocess",
@@ -66,7 +66,7 @@
       {
         "id": "aw-notion",
         "path": "skills/aw-notion/SKILL.md",
-        "description": "How to use the Notion MCP tools exposed through MCP Gateway once this app is installed and a token is saved — tool overview, page/database IDs, what needs to be shared with the integration first."
+        "description": "How to use the Notion MCP tools exposed through MCP Gateway once this app is installed and a token is saved \u2014 tool overview, page/database IDs, what needs to be shared with the integration first."
       }
     ]
   },
@@ -76,7 +76,7 @@
       "notion_token": {
         "type": "string",
         "x-secret": true,
-        "description": "Notion internal integration secret (from notion.so/profile/integrations, starts with ntn_ or secret_). Never stored in plain config — routed to the zero-knowledge secret store via POST /api/apps/notion/settings, same pattern as aw-app-git's github_token. The integration also needs each page/database it should see shared with it from Notion's own ‘Connect to integration’ UI — a token alone grants no access."
+        "description": "Notion internal integration secret (from notion.so/profile/integrations, starts with ntn_ or secret_). Never stored in plain config \u2014 routed to the zero-knowledge secret store via POST /api/apps/notion/settings, same pattern as aw-app-git's github_token. The integration also needs each page/database it should see shared with it from Notion's own \u2018Connect to integration\u2019 UI \u2014 a token alone grants no access."
       }
     },
     "required": []

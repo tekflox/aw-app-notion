@@ -1,0 +1,42 @@
+{
+  "layout": "stack",
+  "regions": [
+    {
+      "id": "status",
+      "widgets": [
+        { "type": "markdown", "value": "## Notion" },
+        {
+          "type": "auth_status",
+          "bind": "GET /api/apps/notion/status",
+          "logout_action": { "call": "POST /api/apps/notion/logout" },
+          "loading_text": "Checking Notion token…",
+          "logged_in_text": "Token saved — MCP Gateway will expose the notion server once it (re)loads."
+        }
+      ]
+    },
+    {
+      "id": "setup",
+      "widgets": [
+        {
+          "type": "markdown",
+          "value": "### Setup\n1. Create an **internal** integration at [notion.so/profile/integrations](https://www.notion.so/profile/integrations) and copy its secret (starts with `ntn_` or `secret_`).\n2. Share the pages/databases you want the agent to see with that integration — either from the integration's **Access** tab, or per-page via the `···` menu → **Connect to integration**. A token alone grants no access.\n3. Paste the secret below and save.\n\nAfter saving, MCP Gateway picks up the new token on its next reload — reinstall/restart the **MCP Gateway** app if you need it active immediately."
+        },
+        {
+          "type": "form",
+          "id": "notion_settings",
+          "submit": { "call": "POST /api/apps/notion/settings" },
+          "submit_label": "Save",
+          "fields": [
+            {
+              "key": "notion_token",
+              "label": "Notion integration secret",
+              "input": "password",
+              "placeholder": "ntn_…",
+              "description": "Stored in the zero-knowledge secret store, never in plain config."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

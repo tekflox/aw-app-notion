@@ -1,0 +1,96 @@
+{
+  "manifest_version": 1,
+  "id": "notion",
+  "name": "Notion",
+  "version": "0.1.0",
+  "description": "Ports agentic-workspace's generic Notion MCP integration into aw-workspace: stores a Notion internal-integration token in the zero-knowledge secret store and generates the mcp.json entry (@notionhq/notion-mcp-server) that MCP Gateway scans, so any agent running in the workspace gets Notion tools through the gateway.",
+  "icon": "book-open",
+  "tier": "inprocess",
+  "requires_ui_refresh": true,
+  "category": "Integrations",
+  "publisher": "TekFlox",
+  "resource_estimate": {
+    "cpu": "low",
+    "memory": "low",
+    "disk": "low"
+  },
+  "runtime": {
+    "python": ">=3.11",
+    "entrypoint": "notion_app.plugin:NotionAppPlugin",
+    "pip_requires": []
+  },
+  "permissions": [
+    "routes:register",
+    "secrets:own",
+    "fs:workspace-data"
+  ],
+  "contributes": {
+    "routes": [
+      {
+        "prefix": "/api/apps/notion"
+      }
+    ],
+    "windows": [
+      {
+        "id": "notion.main",
+        "title": "Notion",
+        "icon": "book-open",
+        "body": {
+          "type": "declarative",
+          "spec": "windows/main.json"
+        }
+      }
+    ],
+    "settings_panels": [
+      {
+        "id": "notion.settings",
+        "window": "notion.main"
+      }
+    ],
+    "mcp": {
+      "provides": [
+        "query-data-source",
+        "retrieve-a-data-source",
+        "update-a-data-source",
+        "create-a-data-source",
+        "retrieve-a-database",
+        "list-data-source-templates",
+        "retrieve-page-markdown",
+        "update-page-markdown",
+        "move-page",
+        "search",
+        "comments"
+      ]
+    },
+    "skills": [
+      {
+        "id": "aw-notion",
+        "path": "skills/aw-notion/SKILL.md",
+        "description": "How to use the Notion MCP tools exposed through MCP Gateway once this app is installed and a token is saved — tool overview, page/database IDs, what needs to be shared with the integration first."
+      }
+    ]
+  },
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "notion_token": {
+        "type": "string",
+        "x-secret": true,
+        "description": "Notion internal integration secret (from notion.so/profile/integrations, starts with ntn_ or secret_). Never stored in plain config — routed to the zero-knowledge secret store via POST /api/apps/notion/settings, same pattern as aw-app-git's github_token. The integration also needs each page/database it should see shared with it from Notion's own ‘Connect to integration’ UI — a token alone grants no access."
+      }
+    },
+    "required": []
+  },
+  "dependencies": {
+    "apps": [
+      {
+        "id": "mcp-gateway",
+        "version": ">=0.1.0",
+        "required": true,
+        "reason": "Notion contributes an mcp.json definition (the 'notion' MCP server) that MCP Gateway discovers and merges."
+      }
+    ],
+    "note": "Runtime-enforced app dependency: aw-workspace installs/loads mcp-gateway before notion so the gateway can scan notion/mcp.json."
+  },
+  "migrations": {}
+}

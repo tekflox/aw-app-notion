@@ -591,3 +591,64 @@ def test_a_raising_job_is_reported_as_failed_not_lost():
     assert final["status"] == "failed"
     assert "object_not_found" in final["error"]
     assert final["result"] is None
+
+
+def test_cards_with_the_same_title_do_not_overwrite_each_other(tmp_path, monkeypatch):
+    """A real board has repeated titles — "Untitled" alone accounted for
+    several. Without disambiguation one card silently overwrites another's
+    file and the mirror is quietly short."""
+    client, board = _kanban_setup(tmp_path, monkeypatch, [
+        _card("c1", "Untitled", "Done"),
+        _card("c2", "Untitled", "Done"),
+        _card("c3", "Único", "Done"),
+    ])
+    result = sync_mod.sync_kanban(client, board)
+    files = _tree(tmp_path)["done"]
+    assert len(files) == 3
+    assert "único.md" in files                       # unique title keeps a clean name
+    assert len([f for f in files if f.startswith("untitled-")]) == 2
+    assert result["added"] == 3
+    assert result["cards"] == 3
+
+
+def test_collisions_suffix_every_colliding_card_not_just_the_losers(tmp_path, monkeypatch):
+    """Suffixing only the second one would make a card's filename depend on
+    the order the board came back in."""
+    client, board = _kanban_setup(tmp_path, monkeypatch, [
+        _card("aaaaaaaa-1111", "Untitled", "Done"),
+        _card("bbbbbbbb-2222", "Untitled", "Done"),
+    ])
+    sync_mod.sync_kanban(client, board)
+    assert _tree(tmp_path)["done"] == ["untitled-aaaaaaaa.md", "untitled-bbbbbbbb.md"]
+
+
+def test_same_title_in_different_statuses_needs_no_suffix(tmp_path, monkeypatch):
+    """They're in different directories — there's no collision to solve."""
+    client, board = _kanban_setup(tmp_path, monkeypatch, [
+        _card("c1", "Deploy", "Done"), _card("c2", "Deploy", "Backlog")])
+    sync_mod.sync_kanban(client, board)
+    assert _tree(tmp_path) == {"backlog": ["deploy.md"], "done": ["deploy.md"]}
+
+
+def test_a_card_whose_slug_gained_a_suffix_is_moved_not_duplicated(tmp_path, monkeypatch):
+    client, board = _kanban_setup(tmp_path, monkeypatch,
+                                  [_card("aaaaaaaa-1111", "Untitled", "Done")])
+    sync_mod.sync_kanban(client, board)
+    assert _tree(tmp_path)["done"] == ["untitled.md"]
+
+    # a second card with the same title shows up → both must gain a suffix
+    client.cards.append(_card("bbbbbbbb-2222", "Untitled", "Done"))
+    client.children["bbbbbbbb-2222"] = [_para("corpo")]
+    sync_mod.sync_kanban(client, board)
+    assert _tree(tmp_path)["done"] == ["untitled-aaaaaaaa.md", "untitled-bbbbbbbb.md"]
+
+
+def test_tracked_card_count_matches_files_on_disk(tmp_path, monkeypatch):
+    """The regression this whole group exists for: 469 cards tracked, 462 on
+    disk, and nothing said a word."""
+    cards = [_card(f"c{i}", "Untitled" if i % 3 == 0 else f"Card {i}", "Done")
+             for i in range(12)]
+    client, board = _kanban_setup(tmp_path, monkeypatch, cards)
+    result = sync_mod.sync_kanban(client, board)
+    on_disk = sum(len(v) for v in _tree(tmp_path).values())
+    assert result["cards"] == on_disk == 12

@@ -322,8 +322,41 @@ def _card_comments_md(client: NotionClient, page_id: str) -> str:
     return "\n".join(out)
 
 
+def _card_status(card: dict) -> str:
+    """The card's Notion status option name, straight off the query result."""
+    prop = card.get("properties", {}).get("Status", {})
+    return ((prop.get("select") or prop.get("status") or {}) or {}).get("name", "")
+
+
+def _card_slugs(cards: list[dict], statuses: dict[str, str]) -> dict[str, str]:
+    """page_id → the slug to use, with collisions disambiguated.
+
+    Card titles are not unique on a real board — "Untitled" alone accounted
+    for several, and a slug collision silently means one card overwrites
+    another's file and the mirror is quietly short. When a slug is claimed by
+    more than one card in the same status dir, ALL of them get an id suffix,
+    not just the losers: that keeps a card's filename from depending on which
+    order the board came back in.
+    """
+    from .kanban.client import page_title
+
+    keys: dict[str, list[str]] = {}
+    base: dict[str, tuple[str, str]] = {}
+    for card in cards:
+        status_key = _status_dirname(_card_status(card), statuses)
+        slug = _slugify(page_title(card) or "Untitled")
+        base[card["id"]] = (status_key, slug)
+        keys.setdefault(f"{status_key}/{slug}", []).append(card["id"])
+
+    out: dict[str, str] = {}
+    for page_id, (status_key, slug) in base.items():
+        colliding = keys[f"{status_key}/{slug}"]
+        out[page_id] = f"{slug}-{page_id.replace('-', '')[:8]}" if len(colliding) > 1 else slug
+    return out
+
+
 def _render_card(client: NotionClient, card: dict, statuses: dict[str, str],
-                 *, with_comments: bool) -> tuple[str, str, str]:
+                 *, with_comments: bool, slug: str | None = None) -> tuple[str, str, str]:
     """Render one card. Returns (rel_path, status_key, content)."""
     from .kanban.client import extract_property_value, page_title
 
@@ -333,7 +366,7 @@ def _render_card(client: NotionClient, card: dict, statuses: dict[str, str],
     plain = {k: extract_property_value(v) for k, v in props.items()}
     notion_status = plain.get("Status") or ""
     status_key = _status_dirname(notion_status, statuses)
-    slug = _slugify(title)
+    slug = slug or _slugify(title)
     rel_path = f"{KANBAN_SUBDIR}/{status_key}/{slug}.md"
 
     body = _blocks_to_md(client, _get_block_children(client, page_id))
@@ -412,6 +445,7 @@ def sync_kanban(client: NotionClient, board, *, force: bool = False,
 
     cards = _query_all_cards(client, db_id)
     active_ids = {c["id"] for c in cards}
+    slugs = _card_slugs(cards, statuses)
     added = updated = skipped = moved = removed = 0
 
     # A card that left the board (archived/deleted) must not linger in the
@@ -433,15 +467,17 @@ def sync_kanban(client: NotionClient, board, *, force: bool = False,
 
         # Skip on an unchanged timestamp WITHOUT fetching the body/comments —
         # that's the whole point of reading last_edited_time off the query.
+        expected = f"{KANBAN_SUBDIR}/{_status_dirname(_card_status(card), statuses)}/{slugs[page_id]}.md"
         if (not force and prev.get("last_edited") == last_edited
-                and prev.get("path")
-                and os.path.exists(os.path.join(root, prev["path"]))):
+                and prev.get("path") == expected
+                and os.path.exists(os.path.join(root, expected))):
             skipped += 1
             continue
 
         try:
             rel_path, status_key, content = _render_card(
-                client, card, statuses, with_comments=with_comments)
+                client, card, statuses, with_comments=with_comments,
+                slug=slugs.get(page_id))
         except NotionError as exc:
             lines.append(f"warn: failed to render card {page_id} — {exc}")
             continue

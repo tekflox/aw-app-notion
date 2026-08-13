@@ -56,11 +56,14 @@ def test_status_without_token():
         client, _ctx = _client(Path(tmp))
         resp = client.get("/status")
         assert resp.status_code == 200
-        assert resp.json() == {
-            "logged_in": False,
-            "configured": False,
-            "mcp_server_enabled": False,
-        }
+        body = resp.json()
+        assert body["logged_in"] is False
+        assert body["configured"] is False
+        assert body["mcp_server_enabled"] is False
+        # Kanban reports separately: no board id is a different problem from
+        # no token, and the UI has to be able to tell them apart.
+        assert body["kanban"]["configured"] is False
+        assert body["kanban"]["statuses"]["need_human"] == "Need Human"
 
 
 def test_save_settings_writes_secret_and_mcp_json():
@@ -128,3 +131,13 @@ def test_build_mcp_servers_shape_with_token():
     assert servers["notion"]["command"] == "npx"
     assert servers["notion"]["args"] == ["-y", "@notionhq/notion-mcp-server"]
     assert servers["notion"]["env"]["NOTION_TOKEN"] == "ntn_xyz"
+
+
+def test_build_mcp_servers_also_advertises_kanban():
+    """Both servers appear or neither does — the kanban one is useless
+    without a token too, so it must not be advertised on its own."""
+    servers = mcp_config.build_mcp_servers("ntn_xyz", port=9030)
+    assert set(servers) == {"notion", "aw-kanban"}
+    kanban = servers["aw-kanban"]
+    assert kanban["type"] == "http"
+    assert kanban["url"].endswith(":9030/api/apps/notion/mcp")

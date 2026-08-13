@@ -3,10 +3,10 @@ notion_app's backend sub-app.
 
 Unlike aw-app-template's mode-agnostic ``build_routes()`` (no ``ctx``, works
 standalone too), this app has **no standalone mode** — every route here
-needs ``ctx.secrets`` (the token store) and ``ctx.package_dir`` (where this
-app's own ``mcp.json`` gets regenerated), both of which only exist inside
-the real F4 framework runtime. Same reasoning as aw-app-git, which has no
-``__main__.py`` either.
+needs ``ctx.secrets`` (the token store), ``ctx.config`` (the Kanban board
+settings) and ``ctx.package_dir`` (where this app's own ``mcp.json`` gets
+regenerated), all of which only exist inside the real F4 framework runtime.
+Same reasoning as aw-app-git, which has no ``__main__.py`` either.
 
 ``build_routes(ctx)`` is called once from ``plugin.py``'s ``activate()`` and
 mounted at ``/api/apps/notion`` behind the runtime's ``IdentityGuard`` — see
@@ -20,18 +20,43 @@ straight to ``ctx.secrets`` instead, same pattern as aw-app-git's
 ``github_token`` — the config_schema's ``notion_token`` field exists only so
 the settings UI knows to render it as a password input (``x-secret``); its
 value is read here, in this app's own route, not by the generic config path.
+
+The Kanban board settings (``kanban_database_id``, ``kanban_statuses``) are
+the opposite case: a database id is not a credential, so it rides the generic
+config path and is read back off ``ctx.config``.
 """
 from __future__ import annotations
 
 from fastapi import Body, FastAPI
+from fastapi.responses import JSONResponse, Response
 
 from . import mcp_config
+from .kanban.cards import KanbanBoard
+from .kanban.client import NotionClient, NotionError
+from .kanban.config import KanbanConfig
 
 TOKEN_KEY = "notion_token"
 
 
 def build_routes(ctx) -> FastAPI:
     app = FastAPI(title="notion")
+
+    # Resolved per call, never snapshotted: a token saved (or cleared) at
+    # runtime has to take effect without a restart.
+    client = NotionClient(lambda: ctx.secrets.read(TOKEN_KEY))
+    kanban_cfg = KanbanConfig(ctx)
+    board = KanbanBoard(client, kanban_cfg)
+
+    def _kanban(fn, *args, **kwargs):
+        """Run a board op, turning a NotionError into its real HTTP status
+        instead of a 500 — a 404 from Notion ("shared with the integration?")
+        and a 503 from us ("no database_id") are different problems and the
+        caller can only tell them apart if we keep the codes."""
+        try:
+            return fn(*args, **kwargs)
+        except NotionError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)},
+                                status_code=exc.status if 400 <= exc.status < 600 else 502)
 
     @app.get("/status")
     async def status() -> dict:
@@ -44,6 +69,11 @@ def build_routes(ctx) -> FastAPI:
             "logged_in": configured,
             "configured": configured,
             "mcp_server_enabled": bool(mcp_config.build_mcp_servers(token)),
+            "kanban": {
+                "configured": kanban_cfg.configured,
+                "database_id": kanban_cfg.database_id,
+                "statuses": kanban_cfg.statuses,
+            },
         }
 
     @app.post("/settings")
@@ -65,6 +95,7 @@ def build_routes(ctx) -> FastAPI:
             "logged_in": True,
             "configured": True,
             "mcp_server_enabled": bool(doc["mcpServers"]),
+            "mcp_servers": sorted(doc["mcpServers"].keys()),
         }
 
     @app.post("/logout")
@@ -80,5 +111,73 @@ def build_routes(ctx) -> FastAPI:
         container."""
         token = ctx.secrets.read(TOKEN_KEY)
         return {"mcpServers": mcp_config.build_mcp_servers(token)}
+
+    # ------------------------------------------------------------------
+    # Kanban — a REST mirror of the MCP tools. The MCP surface is what
+    # agents use; these exist so the board is reachable from curl, the UI
+    # and tests without speaking JSON-RPC.
+    # ------------------------------------------------------------------
+
+    @app.get("/kanban/cards")
+    async def kanban_cards(status: str = "", source: str = "", limit: int = 25,
+                           order: str = "created"):
+        return _kanban(board.list_cards, status=status, source=source,
+                       limit=limit, order=order)
+
+    @app.get("/kanban/cards/{page_id}")
+    async def kanban_card(page_id: str):
+        return _kanban(board.get_card, page_id)
+
+    @app.post("/kanban/cards")
+    async def kanban_create(data: dict = Body(...)):
+        return _kanban(board.create_card, **{
+            k: data.get(k) for k in (
+                "title", "finding_key", "priority", "agent_slug", "target_slug",
+                "input_text", "check_hint", "description", "plan", "source", "tags")
+            if data.get(k) is not None
+        })
+
+    @app.post("/kanban/move")
+    async def kanban_move(data: dict = Body(...)):
+        return _kanban(board.move_card, data.get("page_id") or "",
+                       data.get("status") or "", data.get("comment") or "")
+
+    @app.post("/kanban/comment")
+    async def kanban_comment(data: dict = Body(...)):
+        return _kanban(board.add_comment, data.get("page_id") or "",
+                       data.get("text") or "")
+
+    @app.get("/kanban/properties")
+    async def kanban_get_properties(page_id: str, properties: str = ""):
+        names = [p.strip() for p in properties.split(",") if p.strip()] or None
+        return _kanban(board.get_properties, page_id, names)
+
+    @app.post("/kanban/set-property")
+    async def kanban_set_property(data: dict = Body(...)):
+        return _kanban(board.set_property, data.get("page_id") or "",
+                       data.get("property") or "", data.get("value"))
+
+    # ------------------------------------------------------------------
+    # MCP — Streamable HTTP, auto-discovered by aw-mcp-gateway's app-scan
+    # (see mcp/self_register.py + mcp/http_handler.py).
+    # ------------------------------------------------------------------
+
+    @app.post("/mcp")
+    async def mcp_post(data: dict | list = Body(...)):
+        from .mcp.http_handler import handle_request as mcp_handle_request
+
+        messages = data if isinstance(data, list) else [data]
+        responses = []
+        for m in messages:
+            r = await mcp_handle_request(m, board=board)
+            if r is not None:
+                responses.append(r)
+        if not responses:
+            return Response(status_code=202)
+        return JSONResponse(responses if isinstance(data, list) else responses[0])
+
+    @app.get("/mcp")
+    async def mcp_get():
+        return Response(status_code=405)
 
     return app

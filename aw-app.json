@@ -2,8 +2,8 @@
   "manifest_version": 1,
   "id": "notion",
   "name": "Notion",
-  "version": "0.2.1",
-  "description": "Ports agentic-workspace's generic Notion MCP integration into aw-workspace: stores a Notion internal-integration token in the zero-knowledge secret store and generates the mcp.json entry (@notionhq/notion-mcp-server) that MCP Gateway scans, so any agent running in the workspace gets Notion tools through the gateway.",
+  "version": "0.3.0",
+  "description": "Ports agentic-workspace's Notion integration into aw-workspace: stores a Notion internal-integration token in the zero-knowledge secret store and generates the mcp.json entries MCP Gateway scans — both the generic @notionhq/notion-mcp-server and this app's own aw-kanban server, which turns a Notion database into the Agents Kanban board (list/create/move/comment on cards, set QA status, flag blockers).",
   "icon": "book-open",
   "tier": "inprocess",
   "requires_ui_refresh": true,
@@ -59,14 +59,28 @@
         "update-page-markdown",
         "move-page",
         "search",
-        "comments"
+        "comments",
+        "list_kanban_cards",
+        "get_kanban_card",
+        "create_kanban_task",
+        "move_kanban_task",
+        "add_kanban_comment",
+        "set_kanban_property",
+        "get_kanban_properties",
+        "set_qa_status",
+        "set_blocker"
       ]
     },
     "skills": [
       {
         "id": "aw-notion",
         "path": "skills/aw-notion/SKILL.md",
-        "description": "How to use the Notion MCP tools exposed through MCP Gateway once this app is installed and a token is saved \u2014 tool overview, page/database IDs, what needs to be shared with the integration first."
+        "description": "How to use the Notion MCP tools exposed through MCP Gateway once this app is installed and a token is saved — tool overview, page/database IDs, what needs to be shared with the integration first."
+      },
+      {
+        "id": "aw-kanban",
+        "path": "skills/aw-kanban/SKILL.md",
+        "description": "The Agents Kanban board tools (list/create/move/comment on Notion Kanban cards, set QA status, flag blockers) exposed by this app's aw-kanban MCP server — plus what moved here from the monolith and what deliberately did not."
       }
     ]
   },
@@ -76,7 +90,18 @@
       "notion_token": {
         "type": "string",
         "x-secret": true,
-        "description": "Notion internal integration secret (from notion.so/profile/integrations, starts with ntn_ or secret_). Never stored in plain config \u2014 routed to the zero-knowledge secret store via POST /api/apps/notion/settings, same pattern as aw-app-git's github_token. The integration also needs each page/database it should see shared with it from Notion's own \u2018Connect to integration\u2019 UI \u2014 a token alone grants no access."
+        "description": "Notion internal integration secret (from notion.so/profile/integrations, starts with ntn_ or secret_). Never stored in plain config — routed to the zero-knowledge secret store via POST /api/apps/notion/settings, same pattern as aw-app-git's github_token. The integration also needs each page/database it should see shared with it from Notion's own ‘Connect to integration’ UI — a token alone grants no access."
+      },
+      "kanban_database_id": {
+        "type": "string",
+        "description": "Notion database id of the Agents Kanban board. Ported from agentic-workspace's src/config/aw.json -> notion.agents_kanban.database_id. Without it the aw-kanban MCP tools load but every call returns a 'not configured' error. The database must also be shared with the integration in Notion's own UI."
+      },
+      "kanban_statuses": {
+        "type": "object",
+        "description": "Optional override of the logical-status -> Notion option-name map (backlog, ready, running, ready_to_deploy, need_human, done, auto_resolved, planned, archived, done_archived, self_closed_archived). Merged over the defaults ported from the monolith, so you only restate the options you renamed.",
+        "additionalProperties": {
+          "type": "string"
+        }
       }
     },
     "required": []

@@ -30,7 +30,7 @@ from __future__ import annotations
 from fastapi import Body, FastAPI
 from fastapi.responses import JSONResponse, Response
 
-from . import mcp_config
+from . import mcp_config, sync as sync_mod
 from .kanban.cards import KanbanBoard
 from .kanban.client import NotionClient, NotionError
 from .kanban.config import KanbanConfig
@@ -156,6 +156,46 @@ def build_routes(ctx) -> FastAPI:
     async def kanban_set_property(data: dict = Body(...)):
         return _kanban(board.set_property, data.get("page_id") or "",
                        data.get("property") or "", data.get("value"))
+
+    # ------------------------------------------------------------------
+    # Notion → knowledge base sync (the monolith's ``./aw notion-sync``).
+    # The CLI command in commands/notion_sync.py is a thin client over
+    # these: the token lives in this app's secret store, which no other
+    # process can read, so the work has to happen here.
+    # ------------------------------------------------------------------
+
+    @app.get("/sync/state")
+    async def sync_state() -> dict:
+        cfg = getattr(ctx, "config", None) or {}
+        return {
+            **sync_mod.sync_state(),
+            "root_page_id": cfg.get(sync_mod.ROOT_PAGE_KEY) or "",
+            "bidirectional": bool(cfg.get(sync_mod.BIDIRECTIONAL_KEY, False)),
+            "configured": bool(ctx.secrets.read(TOKEN_KEY)
+                               and cfg.get(sync_mod.ROOT_PAGE_KEY)),
+        }
+
+    @app.post("/sync")
+    async def run_sync(data: dict = Body(default={})):
+        """Long-running: a first full sync walks every child page and every
+        nested block, then blocks on the KB rebuild. Run off the event loop
+        so the workspace server stays responsive while it does."""
+        from fastapi.concurrency import run_in_threadpool
+
+        cfg = getattr(ctx, "config", None) or {}
+        override = data.get("bidirectional")
+        try:
+            return await run_in_threadpool(
+                sync_mod.run_sync, client,
+                cfg.get(sync_mod.ROOT_PAGE_KEY) or "",
+                force=bool(data.get("force")),
+                bidirectional=(bool(cfg.get(sync_mod.BIDIRECTIONAL_KEY, False))
+                               if override is None else bool(override)),
+                rebuild=data.get("rebuild", True) is not False,
+            )
+        except NotionError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)},
+                                status_code=exc.status if 400 <= exc.status < 600 else 502)
 
     # ------------------------------------------------------------------
     # MCP — Streamable HTTP, auto-discovered by aw-mcp-gateway's app-scan

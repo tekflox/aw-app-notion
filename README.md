@@ -7,7 +7,7 @@ Notion connects an AW Workspace to a Notion internal integration. It lets agents
 - Stores a Notion integration token through workspace-managed secrets.
 - Adds Notion tools for agents, including search, page retrieval, page updates, database access, and comments.
 - Adds the **`aw-kanban` tools** — list, create, move and comment on Kanban cards, set QA verdicts, flag blockers.
-- Adds `aw-workspace-cli notion-sync` — pulls Notion notes into the knowledge base and rebuilds its index.
+- Adds `aw-workspace-cli notion-sync` — mirrors Notion notes *and* the Kanban board into the knowledge base, then rebuilds its index.
 - Provides a settings window for connecting the workspace to Notion.
 - Works with the workspace tool gateway so Notion access is available from agent sessions.
 
@@ -25,17 +25,40 @@ For the knowledge-base sync, set `sync_root_page_id` to the Notion page whose ch
 
 ## `aw-workspace-cli notion-sync`
 
-Replaces the monolith's `./aw notion-sync`. Every child page under `sync_root_page_id` is converted to Markdown and written to `<AW_WORKSPACE_HOME>/knowledge_base/notes/<slug>.md` — the tree aw-app-kb indexes — then the KB is reindexed.
+Replaces the monolith's `./aw notion-sync`, and does more than it did. Everything is mirrored under one `notion/` root inside the KB tree (`<AW_WORKSPACE_HOME>/knowledge_base/`), so a search result's path says where it came from:
+
+```
+notion/
+  notes/                     ← child pages under sync_root_page_id
+  kanban/
+    backlog/                 ← one dir per status, keyed on the LOGICAL status
+    ready/
+    done/
+    need_human/
+    ...
+```
 
 ```bash
-aw-workspace-cli notion-sync                     # changed pages only
-aw-workspace-cli notion-sync --force             # re-sync everything
-aw-workspace-cli notion-sync --bidirectional     # also push deletions
-aw-workspace-cli notion-sync --no-rebuild        # write notes, skip the reindex
+aw-workspace-cli notion-sync                     # both halves, changed only
+aw-workspace-cli notion-sync --force             # re-render everything
+aw-workspace-cli notion-sync --notes-only
+aw-workspace-cli notion-sync --kanban-only
+aw-workspace-cli notion-sync --bidirectional     # notes: also push deletions
+aw-workspace-cli notion-sync --no-rebuild        # write files, skip the reindex
 aw-workspace-cli notion-sync --status            # what the last sync did
 ```
 
-The command is a thin client over `POST /api/apps/notion/sync`, not a local reimplementation: the Notion token lives in this app's secret store, readable only by the app inside the workspace process. A failed KB reindex exits 2 — the notes are still written, and the next build picks them up.
+The command is a thin client over `POST /api/apps/notion/sync`, not a local reimplementation: the Notion token lives in this app's secret store, readable only by the app inside the workspace process. A failed KB reindex exits 2 — the files are still written, and the next build picks them up.
+
+### The two mirrors are not symmetric
+
+`notion/notes/` is a **sync**. With `sync_bidirectional` on, deleting a note archives its Notion page.
+
+`notion/kanban/` is a **derived mirror**. Deleting a file there does nothing to Notion — the card is re-exported on the next run. A Kanban card's lifecycle belongs to the board, and the MCP tools (`move_kanban_task`, …) are how you change it.
+
+Status dirs are keyed on the *logical* status (`need_human`), not the Notion label (`Need Human`), so renaming an option in Notion doesn't move every file. "Auto-resolvido" → "Self-closed" already happened once. A card that changes status has its old file removed, and a status dir left empty is pruned — a stale empty `ready/` would read as "nothing is ready".
+
+Cards sync incrementally off `last_edited_time`, which comes back on the board query itself, so an unchanged card costs zero extra Notion calls. One caveat: posting a Notion comment does *not* bump `last_edited_time`, so a comment-only change is picked up by `--force`, not by an incremental run.
 
 ## Two MCP servers, one app
 

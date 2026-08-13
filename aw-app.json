@@ -3,7 +3,7 @@
   "id": "notion",
   "name": "Notion",
   "version": "0.5.0",
-  "description": "Ports agentic-workspace's Notion integration into aw-workspace: stores a Notion internal-integration token in the zero-knowledge secret store and generates the mcp.json entries MCP Gateway scans \u2014 both the generic @notionhq/notion-mcp-server and this app's own aw-kanban server, which turns a Notion database into the Agents Kanban board (list/create/move/comment on cards, set QA status, flag blockers).",
+  "description": "Ports agentic-workspace's Notion integration into aw-workspace: stores a Notion internal-integration token in the zero-knowledge secret store and generates the mcp.json entries MCP Gateway scans — both the generic @notionhq/notion-mcp-server and this app's own aw-kanban server, which turns a Notion database into the Agents Kanban board (list/create/move/comment on cards, set QA status, flag blockers).",
   "icon": "book-open",
   "tier": "inprocess",
   "requires_ui_refresh": true,
@@ -75,19 +75,19 @@
       {
         "id": "aw-notion",
         "path": "skills/aw-notion/SKILL.md",
-        "description": "How to use the Notion MCP tools exposed through MCP Gateway once this app is installed and a token is saved \u2014 tool overview, page/database IDs, what needs to be shared with the integration first."
+        "description": "How to use the Notion MCP tools exposed through MCP Gateway once this app is installed and a token is saved — tool overview, page/database IDs, what needs to be shared with the integration first."
       },
       {
         "id": "aw-kanban",
         "path": "skills/aw-kanban/SKILL.md",
-        "description": "The Agents Kanban board tools (list/create/move/comment on Notion Kanban cards, set QA status, flag blockers) exposed by this app's aw-kanban MCP server \u2014 plus what moved here from the monolith and what deliberately did not."
+        "description": "The Agents Kanban board tools (list/create/move/comment on Notion Kanban cards, set QA status, flag blockers) exposed by this app's aw-kanban MCP server — plus what moved here from the monolith and what deliberately did not."
       }
     ],
     "commands": [
       {
         "name": "notion-sync",
         "path": "commands/notion_sync.py",
-        "description": "Sync Notion notes \u2192 the knowledge base and rebuild its index. Replaces the monolith's ./aw notion-sync."
+        "description": "Mirror Notion notes (notion/notes/) and Kanban cards (notion/kanban/<status>/) into the knowledge base and rebuild its index. Replaces the monolith's ./aw notion-sync."
       }
     ]
   },
@@ -97,7 +97,7 @@
       "notion_token": {
         "type": "string",
         "x-secret": true,
-        "description": "Notion internal integration secret (from notion.so/profile/integrations, starts with ntn_ or secret_). Never stored in plain config \u2014 routed to the zero-knowledge secret store via POST /api/apps/notion/settings, same pattern as aw-app-git's github_token. The integration also needs each page/database it should see shared with it from Notion's own \u2018Connect to integration\u2019 UI \u2014 a token alone grants no access."
+        "description": "Notion internal integration secret (from notion.so/profile/integrations, starts with ntn_ or secret_). Never stored in plain config — routed to the zero-knowledge secret store via POST /api/apps/notion/settings, same pattern as aw-app-git's github_token. The integration also needs each page/database it should see shared with it from Notion's own ‘Connect to integration’ UI — a token alone grants no access."
       },
       "kanban_database_id": {
         "type": "string",
@@ -118,6 +118,11 @@
         "type": "boolean",
         "default": false,
         "description": "When true, notion-sync also pushes deletions: a note deleted locally archives its Notion page, and a page archived in Notion removes the local note. Ported from notion.bidirectional. Overridable per run with --bidirectional / --no-bidirectional."
+      },
+      "sync_kanban_comments": {
+        "type": "boolean",
+        "default": true,
+        "description": "Include each card's comment thread in its exported markdown. On this board the comments are where the delivery reports and QA verdicts live, so this is on by default. Costs one extra Notion call per changed card. Note that posting a comment does not bump a page's last_edited_time, so a comment-only change is picked up by --force, not by an incremental run."
       }
     },
     "required": []

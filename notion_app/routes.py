@@ -167,12 +167,16 @@ def build_routes(ctx) -> FastAPI:
     @app.get("/sync/state")
     async def sync_state() -> dict:
         cfg = getattr(ctx, "config", None) or {}
+        has_token = bool(ctx.secrets.read(TOKEN_KEY))
         return {
             **sync_mod.sync_state(),
             "root_page_id": cfg.get(sync_mod.ROOT_PAGE_KEY) or "",
             "bidirectional": bool(cfg.get(sync_mod.BIDIRECTIONAL_KEY, False)),
-            "configured": bool(ctx.secrets.read(TOKEN_KEY)
-                               and cfg.get(sync_mod.ROOT_PAGE_KEY)),
+            "kanban_comments": bool(cfg.get(sync_mod.COMMENTS_KEY, True)),
+            # Each half reports separately: a workspace can legitimately
+            # mirror only the board, or only the notes.
+            "notes_configured": has_token and bool(cfg.get(sync_mod.ROOT_PAGE_KEY)),
+            "kanban_configured": has_token and kanban_cfg.configured,
         }
 
     @app.post("/sync")
@@ -187,11 +191,14 @@ def build_routes(ctx) -> FastAPI:
         try:
             return await run_in_threadpool(
                 sync_mod.run_sync, client,
-                cfg.get(sync_mod.ROOT_PAGE_KEY) or "",
+                cfg.get(sync_mod.ROOT_PAGE_KEY) or "", board,
                 force=bool(data.get("force")),
                 bidirectional=(bool(cfg.get(sync_mod.BIDIRECTIONAL_KEY, False))
                                if override is None else bool(override)),
                 rebuild=data.get("rebuild", True) is not False,
+                notes=data.get("notes", True) is not False,
+                kanban=data.get("kanban", True) is not False,
+                with_comments=bool(cfg.get(sync_mod.COMMENTS_KEY, True)),
             )
         except NotionError as exc:
             return JSONResponse({"ok": False, "error": str(exc)},

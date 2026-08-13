@@ -9,16 +9,23 @@ every ``<apps_root>/<slug>/commands/*.py`` exposing
 
 Unlike aw-app-remote-host-cli's command, this one does **not** import the
 app's package and run the work locally. It can't: the Notion token lives in
-this app's zero-knowledge secret store, readable only by the app's own
-``ctx.secrets`` facade inside the running workspace process. So the CLI is a
-thin client over ``POST /api/apps/notion/sync``, authenticating with the
-workspace API key the same way ``aw-workspace-cli marketplace`` does. The
-sync engine itself (``notion_app/sync.py``) stays the single source of truth
-and is equally reachable from an agent, the UI, or curl.
+this app's zero-knowledge secret store, readable only through ``ctx.secrets``
+inside the running workspace process. So the CLI is a thin client over
+``POST /api/apps/notion/sync``, authenticating with the workspace API key the
+same way ``aw-workspace-cli marketplace`` does. The sync engine itself
+(``notion_app/sync.py``) stays the single source of truth and is equally
+reachable from an agent, the UI, or curl.
+
+Two mirrors, one command:
+
+* ``notion/notes/``            — child pages under ``sync_root_page_id``
+* ``notion/kanban/<status>/``  — every Kanban card, filed by its status
 
 Usage:
-    aw-workspace-cli notion-sync                      # sync changed pages only
-    aw-workspace-cli notion-sync --force              # re-sync every page
+    aw-workspace-cli notion-sync                      # both, changed only
+    aw-workspace-cli notion-sync --force              # re-render everything
+    aw-workspace-cli notion-sync --notes-only
+    aw-workspace-cli notion-sync --kanban-only
     aw-workspace-cli notion-sync --bidirectional      # override the saved setting
     aw-workspace-cli notion-sync --no-bidirectional   # pull-only
     aw-workspace-cli notion-sync --no-rebuild         # skip the KB reindex
@@ -30,28 +37,33 @@ import argparse
 import sys
 
 COMMAND = "notion-sync"
-DESCRIPTION = "Sync Notion notes → the knowledge base and rebuild its index"
+DESCRIPTION = "Mirror Notion notes + Kanban cards into the knowledge base"
 
 PROG = "aw-workspace-cli notion-sync"
 
-# A first full sync walks every child page and every nested block, then waits
-# on the KB reindex. The client default (30s) times out long before that.
-SYNC_TIMEOUT = 1800.0
+# A first full sync walks every child page, every card, every nested block,
+# then waits on the KB reindex. The client default (30s) times out long
+# before that.
+SYNC_TIMEOUT = 3600.0
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=PROG, description=DESCRIPTION)
     parser.add_argument("--force", action="store_true",
-                        help="Re-sync all pages, ignoring checksums")
+                        help="Re-render everything, ignoring checksums/timestamps")
     parser.add_argument("--no-rebuild", dest="rebuild", action="store_false",
-                        help="Write the notes but skip the KB index rebuild")
+                        help="Write the files but skip the KB index rebuild")
     parser.add_argument("--status", action="store_true",
                         help="Show the last sync's state and exit")
+    half = parser.add_mutually_exclusive_group()
+    half.add_argument("--notes-only", action="store_true", help="Sync only notion/notes/")
+    half.add_argument("--kanban-only", action="store_true", help="Sync only notion/kanban/")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--bidirectional", dest="bidirectional", action="store_true",
                        default=None,
-                       help="Also archive Notion pages whose local note was deleted "
-                            "(overrides the app's saved setting)")
+                       help="For notes: also archive Notion pages whose local note was "
+                            "deleted (overrides the app's saved setting). Never applies "
+                            "to the Kanban mirror, which is derived, not a source.")
     group.add_argument("--no-bidirectional", dest="bidirectional", action="store_false",
                        help="Pull-only (overrides the app's saved setting)")
     return parser
@@ -69,7 +81,8 @@ def run(args: list[str] | None = None) -> int:
     if parsed.status:
         return _print_status(local_client)
 
-    body: dict = {"force": parsed.force, "rebuild": parsed.rebuild}
+    body: dict = {"force": parsed.force, "rebuild": parsed.rebuild,
+                  "notes": not parsed.kanban_only, "kanban": not parsed.notes_only}
     if parsed.bidirectional is not None:
         body["bidirectional"] = parsed.bidirectional
 
@@ -88,18 +101,33 @@ def run(args: list[str] | None = None) -> int:
     for line in result.get("log", []):
         print(f"  {line}")
 
-    parts = [f"{result['added']} added", f"{result['updated']} updated",
-             f"{result['skipped']} skipped"]
-    if result.get("deleted"):
-        parts.append(f"{result['deleted']} deleted/archived")
-    print(f"Done: {', '.join(parts)}.")
-    print(f"Notes: {result.get('notes_dir', '')}")
+    notes, kanban = result.get("notes"), result.get("kanban")
+    if notes:
+        parts = [f"{notes['added']} added", f"{notes['updated']} updated",
+                 f"{notes['skipped']} skipped"]
+        if notes.get("deleted"):
+            parts.append(f"{notes['deleted']} deleted/archived")
+        print(f"notes:  {', '.join(parts)}  → {notes.get('notes_dir', '')}")
+    if kanban:
+        parts = [f"{kanban['added']} added", f"{kanban['updated']} updated",
+                 f"{kanban['skipped']} skipped"]
+        if kanban.get("moved"):
+            parts.append(f"{kanban['moved']} moved status")
+        if kanban.get("removed"):
+            parts.append(f"{kanban['removed']} removed")
+        print(f"kanban: {', '.join(parts)}  → {kanban.get('kanban_dir', '')}")
+        by_status = kanban.get("by_status") or {}
+        if by_status:
+            print("        " + "  ".join(f"{k}={v}" for k, v in by_status.items()))
+    if not notes and not kanban:
+        print("Nothing synced — neither half is configured.")
+        return 1
 
-    # A failed rebuild is not a failed sync — the notes are on disk and the
+    # A failed rebuild is not a failed sync — the files are on disk and the
     # next build picks them up — but it must not read as a clean run either.
     rebuild = result.get("kb_rebuild")
     if rebuild and not rebuild.get("ok"):
-        print(f"{PROG}: notes written, but the KB reindex failed — run "
+        print(f"{PROG}: files written, but the KB reindex failed — run "
               f"`aw-workspace-cli knowledge-base --build`", file=sys.stderr)
         return 2
     return 0
@@ -110,12 +138,19 @@ def _print_status(local_client) -> int:
     if status != 200 or not isinstance(body, dict):
         print(f"{PROG}: could not read sync state ({status}): {body}", file=sys.stderr)
         return 1
-    if not body.get("configured"):
-        missing = "sync_root_page_id" if not body.get("root_page_id") else "a Notion token"
-        print(f"not configured — missing {missing}")
+
     print(f"last sync:     {body.get('last_sync') or 'never'}")
-    print(f"tracked pages: {body.get('tracked_pages', 0)}")
-    print(f"root page:     {body.get('root_page_id') or '(unset)'}")
-    print(f"bidirectional: {body.get('bidirectional')}")
-    print(f"notes dir:     {body.get('notes_dir')}")
+    print()
+    print(f"notes:         {'configured' if body.get('notes_configured') else 'NOT configured'}"
+          f"  ({body.get('tracked_pages', 0)} tracked)")
+    print(f"  root page:   {body.get('root_page_id') or '(unset)'}")
+    print(f"  bidirectional: {body.get('bidirectional')}")
+    print(f"  dir:         {body.get('notes_dir')}")
+    print()
+    print(f"kanban:        {'configured' if body.get('kanban_configured') else 'NOT configured'}"
+          f"  ({body.get('tracked_cards', 0)} cards)")
+    print(f"  comments:    {body.get('kanban_comments')}")
+    print(f"  dir:         {body.get('kanban_dir')}")
+    for key, count in (body.get("cards_by_status") or {}).items():
+        print(f"    {key:<24} {count}")
     return 0

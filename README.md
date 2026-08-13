@@ -48,7 +48,11 @@ aw-workspace-cli notion-sync --no-rebuild        # write files, skip the reindex
 aw-workspace-cli notion-sync --status            # what the last sync did
 ```
 
-The command is a thin client over `POST /api/apps/notion/sync`, not a local reimplementation: the Notion token lives in this app's secret store, readable only by the app inside the workspace process. A failed KB reindex exits 2 — the files are still written, and the next build picks them up.
+The command is a thin client over `POST /api/apps/notion/sync`, not a local reimplementation: the Notion token lives in this app's secret store, readable only by the app inside the workspace process.
+
+That endpoint returns **202 with a job**, not the result. A full sync runs for minutes, and the BYOD tunnel in front of this workspace drops a long-held request and answers `502 workspace offline` while the work is still running perfectly well — the same wall core's `POST /api/apps/install` hit. So the CLI starts the job and polls `GET /api/apps/notion/sync/job`; no single request is ever long. Only one sync runs at a time; a second start is refused with 409 rather than queued.
+
+A failed KB reindex exits 2 — the files are still written, and the next build picks them up.
 
 ### The two mirrors are not symmetric
 

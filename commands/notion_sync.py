@@ -35,16 +35,19 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 COMMAND = "notion-sync"
 DESCRIPTION = "Mirror Notion notes + Kanban cards into the knowledge base"
 
 PROG = "aw-workspace-cli notion-sync"
 
-# A first full sync walks every child page, every card, every nested block,
-# then waits on the KB reindex. The client default (30s) times out long
-# before that.
-SYNC_TIMEOUT = 3600.0
+# The sync runs as a background job on the server (202 + poll), because the
+# BYOD tunnel drops a long-held request and answers "502 workspace offline"
+# while the work is still running fine — see notion_app/job.py. So no request
+# this command makes is ever long; only the total wait is.
+POLL_EVERY_S = 3.0
+MAX_WAIT_S = 3600.0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -90,14 +93,27 @@ def run(args: list[str] | None = None) -> int:
     print(f"Syncing Notion {direction} the knowledge base"
           f"{'  (force)' if parsed.force else ''}...")
 
-    status, result = local_client.request(
-        "POST", "/api/apps/notion/sync", body, timeout=SYNC_TIMEOUT)
-    if status != 200 or not isinstance(result, dict) or not result.get("ok"):
-        print(f"{PROG}: sync failed ({status}): "
-              f"{result.get('error') if isinstance(result, dict) else result}",
+    status, started = local_client.request("POST", "/api/apps/notion/sync", body)
+    if status == 409:
+        print(f"{PROG}: a sync is already running — poll with --status",
+              file=sys.stderr)
+        return 1
+    if status != 202:
+        print(f"{PROG}: could not start the sync ({status}): "
+              f"{started.get('error') if isinstance(started, dict) else started}",
               file=sys.stderr)
         return 1
 
+    job = _wait_for_job(local_client)
+    if job is None:
+        print(f"{PROG}: gave up waiting after {int(MAX_WAIT_S)}s — the job may still "
+              f"be running; check with --status", file=sys.stderr)
+        return 1
+    if job.get("status") == "failed":
+        print(f"{PROG}: sync failed: {job.get('error')}", file=sys.stderr)
+        return 1
+
+    result = job.get("result") or {}
     for line in result.get("log", []):
         print(f"  {line}")
 
@@ -131,6 +147,18 @@ def run(args: list[str] | None = None) -> int:
               f"`aw-workspace-cli knowledge-base --build`", file=sys.stderr)
         return 2
     return 0
+
+
+def _wait_for_job(local_client) -> dict | None:
+    """Poll until the job leaves `running`. Each poll is a short request, so
+    a tunnel that kills long-held connections never sees one."""
+    deadline = time.monotonic() + MAX_WAIT_S
+    while time.monotonic() < deadline:
+        status, job = local_client.request("GET", "/api/apps/notion/sync/job")
+        if status == 200 and isinstance(job, dict) and job.get("status") != "running":
+            return job
+        time.sleep(POLL_EVERY_S)
+    return None
 
 
 def _print_status(local_client) -> int:

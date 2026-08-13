@@ -525,3 +525,69 @@ def test_upgrading_with_bidirectional_does_not_archive_everything(tmp_path, monk
     sync_mod.sync_notes(client, ROOT_PAGE, bidirectional=True)
     assert client.patched == []
     assert _notes(tmp_path) == ["nota-um.md"]
+
+
+# ── the background job ──────────────────────────────────────────────────
+
+def test_sync_job_runs_off_the_request_and_reports_its_result():
+    """The BYOD tunnel answers 502 for a long-held request while the work is
+    still running fine, so the sync must not be awaited inside the POST."""
+    import asyncio
+    from notion_app.job import SyncJob
+
+    async def scenario():
+        job = SyncJob()
+        assert job.snapshot()["status"] == "idle"
+        assert job.start(lambda: {"ok": True, "added": 3}) is True
+        assert job.snapshot()["status"] == "running"
+        for _ in range(200):
+            if job.snapshot()["status"] != "running":
+                break
+            await asyncio.sleep(0.01)
+        return job.snapshot()
+
+    final = asyncio.run(scenario())
+    assert final["status"] == "done"
+    assert final["result"] == {"ok": True, "added": 3}
+    assert final["started_at"] and final["finished_at"]
+
+
+def test_a_second_sync_is_refused_not_queued():
+    """Two concurrent syncs would race on the same files and the same state
+    document, and there's no reason to want one."""
+    import asyncio
+    import threading
+    from notion_app.job import SyncJob
+
+    release = threading.Event()
+
+    async def scenario():
+        job = SyncJob()
+        assert job.start(lambda: release.wait(5) or {"ok": True}) is True
+        second = job.start(lambda: {"ok": True})
+        release.set()
+        return second
+
+    assert asyncio.run(scenario()) is False
+
+
+def test_a_raising_job_is_reported_as_failed_not_lost():
+    import asyncio
+    from notion_app.job import SyncJob
+
+    def boom():
+        raise NotionError(404, '{"code":"object_not_found"}')
+
+    async def scenario():
+        job = SyncJob()
+        job.start(boom)
+        for _ in range(200):
+            if job.snapshot()["status"] != "running":
+                break
+            await asyncio.sleep(0.01)
+        return job.snapshot()
+
+    final = asyncio.run(scenario())
+    assert final["status"] == "failed"
+    assert "object_not_found" in final["error"]
+    assert final["result"] is None

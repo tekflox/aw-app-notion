@@ -31,6 +31,7 @@ from fastapi import Body, FastAPI
 from fastapi.responses import JSONResponse, Response
 
 from . import mcp_config, sync as sync_mod
+from .job import SyncJob
 from .kanban.cards import KanbanBoard
 from .kanban.client import NotionClient, NotionError
 from .kanban.config import KanbanConfig
@@ -46,6 +47,8 @@ def build_routes(ctx) -> FastAPI:
     client = NotionClient(lambda: ctx.secrets.read(TOKEN_KEY))
     kanban_cfg = KanbanConfig(ctx)
     board = KanbanBoard(client, kanban_cfg)
+    # One slot per app instance — see job.py for why it isn't a queue.
+    job = SyncJob()
 
     def _kanban(fn, *args, **kwargs):
         """Run a board op, turning a NotionError into its real HTTP status
@@ -179,19 +182,30 @@ def build_routes(ctx) -> FastAPI:
             "kanban_configured": has_token and kanban_cfg.configured,
         }
 
-    @app.post("/sync")
-    async def run_sync(data: dict = Body(default={})):
-        """Long-running: a first full sync walks every child page and every
-        nested block, then blocks on the KB rebuild. Run off the event loop
-        so the workspace server stays responsive while it does."""
-        from fastapi.concurrency import run_in_threadpool
+    @app.get("/sync/job")
+    async def sync_job() -> dict:
+        """The current (or last) sync job. Poll this after POST /sync."""
+        return job.snapshot()
 
+    @app.post("/sync")
+    async def start_sync(data: dict = Body(default={})):
+        """Kick off a sync in the BACKGROUND and return 202 immediately.
+
+        A full sync walks every child page, every card, every nested block,
+        then waits on the KB reindex — minutes, not seconds. Holding the HTTP
+        connection open for that does not survive the BYOD tunnel, whose edge
+        drops a long-held request and answers ``502 workspace offline`` while
+        the work is still running perfectly well on this side. That is the
+        same wall core's ``POST /api/apps/install`` hit (see its docstring),
+        and this is the same answer: 202 + a pollable job.
+
+        Poll ``GET /sync/job`` until ``status`` leaves ``running``.
+        """
         cfg = getattr(ctx, "config", None) or {}
         override = data.get("bidirectional")
-        try:
-            return await run_in_threadpool(
-                sync_mod.run_sync, client,
-                cfg.get(sync_mod.ROOT_PAGE_KEY) or "", board,
+        started = job.start(
+            lambda: sync_mod.run_sync(
+                client, cfg.get(sync_mod.ROOT_PAGE_KEY) or "", board,
                 force=bool(data.get("force")),
                 bidirectional=(bool(cfg.get(sync_mod.BIDIRECTIONAL_KEY, False))
                                if override is None else bool(override)),
@@ -199,10 +213,11 @@ def build_routes(ctx) -> FastAPI:
                 notes=data.get("notes", True) is not False,
                 kanban=data.get("kanban", True) is not False,
                 with_comments=bool(cfg.get(sync_mod.COMMENTS_KEY, True)),
-            )
-        except NotionError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)},
-                                status_code=exc.status if 400 <= exc.status < 600 else 502)
+            ))
+        if not started:
+            return JSONResponse({"ok": False, "error": "a sync is already running",
+                                 "job": job.snapshot()}, status_code=409)
+        return JSONResponse(job.snapshot(), status_code=202)
 
     # ------------------------------------------------------------------
     # MCP — Streamable HTTP, auto-discovered by aw-mcp-gateway's app-scan

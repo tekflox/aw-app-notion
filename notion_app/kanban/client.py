@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable
@@ -47,10 +49,35 @@ class NotionError(RuntimeError):
         self.body = body
 
 
+# Notion's public API allows roughly 3 requests/second, averaged. A single
+# tool call never gets near that, but a full board export is ~1000 calls back
+# to back and trips it within seconds — the first --force run over 469 cards
+# lost two of them to 429s. Both halves of the defence matter: pacing keeps a
+# long run under the limit, and retry recovers when a burst crosses it anyway.
+MIN_REQUEST_INTERVAL_S = 0.34
+RATE_LIMIT_RETRIES = 4
+RATE_LIMIT_BACKOFF_S = 2.0
+
+
 class NotionClient:
     def __init__(self, token_provider: Callable[[], str | None], *, timeout: int = 20) -> None:
         self._token_provider = token_provider
         self._timeout = timeout
+        self._pace_lock = threading.Lock()
+        self._last_request_at = 0.0
+
+    def _pace(self) -> None:
+        """Space requests out to stay under Notion's rate limit.
+
+        Locked because the workspace serves these from a threadpool: two
+        concurrent callers (an agent's MCP call landing mid-sync) would
+        otherwise each see a stale timestamp and fire together.
+        """
+        with self._pace_lock:
+            wait = MIN_REQUEST_INTERVAL_S - (time.monotonic() - self._last_request_at)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_request_at = time.monotonic()
 
     @property
     def configured(self) -> bool:
@@ -68,16 +95,33 @@ class NotionClient:
         if not self.configured:
             raise NotionError(401, "no Notion token saved — POST /api/apps/notion/settings first")
         data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(
-            f"{NOTION_API}{path}", data=data, headers=self._headers(), method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                raw = resp.read()
-                return json.loads(raw) if raw else {}
-        except urllib.error.HTTPError as e:
-            raise NotionError(e.code, e.read().decode("utf-8", "replace")) from None
-        except urllib.error.URLError as e:
-            raise NotionError(0, f"could not reach api.notion.com: {e.reason}") from None
+
+        for attempt in range(RATE_LIMIT_RETRIES + 1):
+            self._pace()
+            req = urllib.request.Request(
+                f"{NOTION_API}{path}", data=data, headers=self._headers(), method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                    raw = resp.read()
+                    return json.loads(raw) if raw else {}
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt < RATE_LIMIT_RETRIES:
+                    # Notion tells us how long to wait; its own header beats
+                    # any guess we could make. Exponential fallback for the
+                    # (common) case where it doesn't send one.
+                    retry_after = e.headers.get("Retry-After") if e.headers else None
+                    try:
+                        delay = float(retry_after) if retry_after else RATE_LIMIT_BACKOFF_S * (2 ** attempt)
+                    except ValueError:
+                        delay = RATE_LIMIT_BACKOFF_S * (2 ** attempt)
+                    log.info("notion: rate limited on %s, retrying in %.1fs "
+                             "(attempt %d/%d)", path, delay, attempt + 1, RATE_LIMIT_RETRIES)
+                    time.sleep(delay)
+                    continue
+                raise NotionError(e.code, e.read().decode("utf-8", "replace")) from None
+            except urllib.error.URLError as e:
+                raise NotionError(0, f"could not reach api.notion.com: {e.reason}") from None
+        raise NotionError(429, f"still rate limited after {RATE_LIMIT_RETRIES} retries")
 
     # ── convenience wrappers ────────────────────────────────────────────
     def get_page(self, page_id: str) -> dict:

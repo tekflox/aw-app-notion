@@ -416,3 +416,75 @@ def test_unknown_tool_is_an_error_not_a_crash():
     board, _ = _board()
     resp = _call(board, "nope", {})
     assert resp["result"]["isError"] is True
+
+
+# ── rate limiting ───────────────────────────────────────────────────────
+
+def test_a_429_is_retried_not_surfaced(monkeypatch):
+    """A full board export is ~1000 calls back to back and trips Notion's
+    ~3 req/s limit within seconds — the first --force run lost two cards to
+    unretried 429s."""
+    import urllib.error
+    from notion_app.kanban import client as client_mod
+
+    monkeypatch.setattr(client_mod.time, "sleep", lambda _s: None)
+    calls = []
+
+    class FakeResp:
+        status = 200
+        def read(self): return b'{"ok": true}'
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(1)
+        if len(calls) < 3:
+            raise urllib.error.HTTPError(req.full_url, 429, "rate limited", {}, None)
+        return FakeResp()
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", fake_urlopen)
+    c = client_mod.NotionClient(lambda: "ntn_x")
+    assert c.request("GET", "/pages/x") == {"ok": True}
+    assert len(calls) == 3
+
+
+def test_retries_are_finite(monkeypatch):
+    """Retrying forever would hang a sync behind a genuinely exhausted quota."""
+    import urllib.error
+    from notion_app.kanban import client as client_mod
+
+    monkeypatch.setattr(client_mod.time, "sleep", lambda _s: None)
+
+    def always_429(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 429, "rate limited", {}, None)
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", always_429)
+    c = client_mod.NotionClient(lambda: "ntn_x")
+    try:
+        c.request("GET", "/pages/x")
+    except NotionError as exc:
+        assert exc.status == 429
+    else:
+        raise AssertionError("expected NotionError")
+
+
+def test_a_non_429_error_is_not_retried(monkeypatch):
+    """A 404 means "never shared with the integration" — retrying can only
+    waste the caller's time."""
+    import urllib.error
+    from notion_app.kanban import client as client_mod
+
+    monkeypatch.setattr(client_mod.time, "sleep", lambda _s: None)
+    calls = []
+
+    def always_404(req, timeout=None):
+        calls.append(1)
+        raise urllib.error.HTTPError(req.full_url, 404, "nope", {}, None)
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", always_404)
+    c = client_mod.NotionClient(lambda: "ntn_x")
+    try:
+        c.request("GET", "/pages/x")
+    except NotionError as exc:
+        assert exc.status == 404
+    assert len(calls) == 1

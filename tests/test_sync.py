@@ -615,11 +615,11 @@ def test_collisions_suffix_every_colliding_card_not_just_the_losers(tmp_path, mo
     """Suffixing only the second one would make a card's filename depend on
     the order the board came back in."""
     client, board = _kanban_setup(tmp_path, monkeypatch, [
-        _card("aaaaaaaa-1111", "Untitled", "Done"),
-        _card("bbbbbbbb-2222", "Untitled", "Done"),
+        _card("3645bf3b-9510-8000-0000-00000000aaaa", "Untitled", "Done"),
+        _card("3645bf3b-9510-8000-0000-00000000bbbb", "Untitled", "Done"),
     ])
     sync_mod.sync_kanban(client, board)
-    assert _tree(tmp_path)["done"] == ["untitled-aaaaaaaa.md", "untitled-bbbbbbbb.md"]
+    assert _tree(tmp_path)["done"] == ["untitled-0000aaaa.md", "untitled-0000bbbb.md"]
 
 
 def test_same_title_in_different_statuses_needs_no_suffix(tmp_path, monkeypatch):
@@ -631,16 +631,17 @@ def test_same_title_in_different_statuses_needs_no_suffix(tmp_path, monkeypatch)
 
 
 def test_a_card_whose_slug_gained_a_suffix_is_moved_not_duplicated(tmp_path, monkeypatch):
-    client, board = _kanban_setup(tmp_path, monkeypatch,
-                                  [_card("aaaaaaaa-1111", "Untitled", "Done")])
+    a = "3645bf3b-9510-8000-0000-00000000aaaa"
+    b = "3645bf3b-9510-8000-0000-00000000bbbb"
+    client, board = _kanban_setup(tmp_path, monkeypatch, [_card(a, "Untitled", "Done")])
     sync_mod.sync_kanban(client, board)
     assert _tree(tmp_path)["done"] == ["untitled.md"]
 
     # a second card with the same title shows up → both must gain a suffix
-    client.cards.append(_card("bbbbbbbb-2222", "Untitled", "Done"))
-    client.children["bbbbbbbb-2222"] = [_para("corpo")]
+    client.cards.append(_card(b, "Untitled", "Done"))
+    client.children[b] = [_para("corpo")]
     sync_mod.sync_kanban(client, board)
-    assert _tree(tmp_path)["done"] == ["untitled-aaaaaaaa.md", "untitled-bbbbbbbb.md"]
+    assert _tree(tmp_path)["done"] == ["untitled-0000aaaa.md", "untitled-0000bbbb.md"]
 
 
 def test_tracked_card_count_matches_files_on_disk(tmp_path, monkeypatch):
@@ -652,3 +653,18 @@ def test_tracked_card_count_matches_files_on_disk(tmp_path, monkeypatch):
     result = sync_mod.sync_kanban(client, board)
     on_disk = sum(len(v) for v in _tree(tmp_path).values())
     assert result["cards"] == on_disk == 12
+
+
+def test_the_suffix_comes_from_the_id_tail_not_its_shared_prefix(tmp_path, monkeypatch):
+    """Notion ids minted in one workspace share a leading prefix. A
+    head-based suffix disambiguated nothing — three cards titled "AW Meta
+    Display — aprovar deploy TestFlight" all became `...-3a45bf3b.md` and
+    overwrote each other exactly like the un-suffixed name did."""
+    client, board = _kanban_setup(tmp_path, monkeypatch, [
+        _card("3a45bf3b-9510-81a2-0000-000000000001", "Mesmo Título", "Done"),
+        _card("3a45bf3b-9510-81a2-0000-000000000002", "Mesmo Título", "Done"),
+        _card("3a45bf3b-9510-81a2-0000-000000000003", "Mesmo Título", "Done"),
+    ])
+    result = sync_mod.sync_kanban(client, board)
+    assert len(_tree(tmp_path)["done"]) == 3
+    assert result["cards"] == 3

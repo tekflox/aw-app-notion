@@ -351,8 +351,20 @@ def _card_slugs(cards: list[dict], statuses: dict[str, str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for page_id, (status_key, slug) in base.items():
         colliding = keys[f"{status_key}/{slug}"]
-        out[page_id] = f"{slug}-{page_id.replace('-', '')[:8]}" if len(colliding) > 1 else slug
+        out[page_id] = f"{slug}-{_id_suffix(page_id)}" if len(colliding) > 1 else slug
     return out
+
+
+def _id_suffix(page_id: str) -> str:
+    """The disambiguating tail of a Notion page id.
+
+    The TAIL, not the head: ids minted in the same workspace share a leading
+    prefix, so a head-based suffix doesn't disambiguate at all. Three cards
+    titled "AW Meta Display — aprovar deploy TestFlight" all became
+    ``…-3a45bf3b.md`` and overwrote each other exactly the way the un-suffixed
+    name did.
+    """
+    return page_id.replace("-", "")[-8:]
 
 
 def _render_card(client: NotionClient, card: dict, statuses: dict[str, str],

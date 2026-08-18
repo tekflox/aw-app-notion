@@ -838,3 +838,42 @@ def test_client_says_when_it_has_no_api_key(monkeypatch):
         assert "AW_WORKSPACE_API_KEY" in str(exc)
     else:
         raise AssertionError("expected PresentationsUnavailable")
+
+
+# ── get_card body / comments ────────────────────────────────────────────
+# The properties summary is not the card. Anything dispatching an agent from
+# a card needs the body (the task) and the comments (why it makes sense).
+
+def test_get_card_summary_does_not_pay_for_body_or_comments():
+    board, fake = _board({("GET", "/pages/page-1"): _page()})
+    card = board.get_card("page-1")
+    assert "body_md" not in card and "comments_md" not in card
+    assert len(fake.calls) == 1, "summary is exactly one Notion call"
+
+
+def test_get_card_can_include_body_and_comments():
+    board, fake = _board({
+        ("GET", "/pages/page-1"): _page(),
+        ("GET", "/blocks/page-1/children?page_size=100"): {
+            "results": [{"type": "paragraph",
+                         "paragraph": {"rich_text": [{"plain_text": "Fix the thing"}]}}],
+            "has_more": False},
+        ("GET", "/comments?block_id=page-1&page_size=100"): {
+            "results": [{"created_time": "2026-08-01", "rich_text": [{"plain_text": "tried X"}]}]},
+    })
+    card = board.get_card("page-1", include_body=True, include_comments=True)
+    assert "Fix the thing" in card["body_md"]
+    assert "tried X" in card["comments_md"]
+
+
+def test_get_card_body_failure_does_not_sink_the_card():
+    """A card whose body can't be read is still a card — returning nothing
+    would make a dispatch path fail on a page it could otherwise act on."""
+    def boom(_body):
+        raise NotionError(404, "object_not_found")
+
+    board, _ = _board({("GET", "/pages/page-1"): _page(),
+                       ("GET", "/blocks/page-1/children?page_size=100"): boom})
+    card = board.get_card("page-1", include_body=True)
+    assert card["title"] == "A card"
+    assert card["body_md"] == ""

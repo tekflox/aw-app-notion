@@ -136,8 +136,33 @@ class KanbanBoard:
             "url": page.get("url", ""),
         }
 
-    def get_card(self, page_id: str) -> dict:
-        return self._summarise(self.client.get_page(page_id))
+    def get_card(self, page_id: str, *, include_body: bool = False,
+                 include_comments: bool = False) -> dict:
+        """One card. The summary is properties only — the *content* of a card
+        on this board lives in its page body and its comment thread, so both
+        are opt-in extras rather than always-on: they cost one paginated
+        block fetch and one comments fetch each, and most callers only want
+        the properties.
+
+        Anything dispatching an agent from a card wants both — the task
+        description is the body, and the history that makes it make sense is
+        the comments.
+        """
+        card = self._summarise(self.client.get_page(page_id))
+        if include_body or include_comments:
+            # Imported here, not at module scope: sync.py imports this module,
+            # so a top-level import back into it is a cycle.
+            from ..sync import _blocks_to_md, _card_comments_md, _get_block_children
+            if include_body:
+                try:
+                    blocks = _get_block_children(self.client, page_id)
+                    card["body_md"] = _blocks_to_md(self.client, blocks)
+                except NotionError as exc:
+                    log.warning("kanban: could not read body of %s: %s", page_id, exc)
+                    card["body_md"] = ""
+            if include_comments:
+                card["comments_md"] = _card_comments_md(self.client, page_id)
+        return card
 
     def get_properties(self, page_id: str, names: list[str] | None = None) -> dict:
         props = self.client.get_page(page_id).get("properties", {})

@@ -128,8 +128,10 @@ def build_routes(ctx) -> FastAPI:
                        limit=limit, order=order)
 
     @app.get("/kanban/cards/{page_id}")
-    async def kanban_card(page_id: str):
-        return _kanban(board.get_card, page_id)
+    async def kanban_card(page_id: str, include_body: bool = False,
+                          include_comments: bool = False):
+        return _kanban(board.get_card, page_id, include_body=include_body,
+                       include_comments=include_comments)
 
     @app.post("/kanban/cards")
     async def kanban_create(data: dict = Body(...)):

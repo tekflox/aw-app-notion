@@ -95,11 +95,21 @@ TOOLS_SCHEMA: list[dict] = [
         "description": (
             "Read one card's summary — title, status, priority, slugs, tags, timestamps, "
             "URL. Use get_kanban_properties instead when you need arbitrary/custom "
-            "properties rather than this fixed summary."
+            "properties rather than this fixed summary.\n\n"
+            "The card's actual CONTENT is not in the summary: the task description is the "
+            "page body and the history is the comment thread. Pass include_body and "
+            "include_comments to get those as markdown — do that whenever you're about to "
+            "act on a card, not just look it up."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {"page_id": {"type": "string", "description": _PAGE_ID_DESC}},
+            "properties": {
+                "page_id": {"type": "string", "description": _PAGE_ID_DESC},
+                "include_body": {"type": "boolean", "default": False,
+                                 "description": "Add body_md — the page body as markdown. One extra paginated fetch."},
+                "include_comments": {"type": "boolean", "default": False,
+                                     "description": "Add comments_md — the comment thread, oldest to newest. One extra fetch."},
+            },
         },
     },
     {
@@ -300,7 +310,8 @@ def _h_get_card(board: KanbanBoard, args: dict) -> dict:
     page_id = _page_id(args)
     if not page_id:
         raise ValueError("page_id is required")
-    return board.get_card(page_id)
+    return board.get_card(page_id, include_body=bool(args.get("include_body")),
+                          include_comments=bool(args.get("include_comments")))
 
 
 def _h_create(board: KanbanBoard, args: dict) -> dict:

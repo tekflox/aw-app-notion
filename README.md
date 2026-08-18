@@ -91,7 +91,9 @@ So `create_kanban_task` creates the card and stops, and `move_kanban_task(status
 
 `attach_kanban_file` **is** ported — the multipart upload against `/v1/file_uploads` that the monolith reached through an awserv byte-proxying route is now `NotionClient.upload_file`, stdlib-only like the rest of the client. Note the path is read from the aw-workspace filesystem, so a file generated in another container has to be written somewhere shared (`.tmp/`) first.
 
-**Not ported yet:** `attach_kanban_presentation` — it is `attach_kanban_file` plus a cross-app call into aw-app-presentations to export the PNG and mint the share link.
+`attach_kanban_presentation` **is** ported too — it exports the deck to PNG through aw-app-presentations, attaches that, then appends a live share link right after it. This is the only place the app talks to a service that isn't Notion (`notion_app/presentations.py`); the calls go over loopback so a slow render doesn't hit the tunnel edge's ~30s cut, while the link written into the card uses the published URL so a human can actually open it.
+
+**Not ported, and shouldn't be here:** `invoke_kanban_agent` and `run_ready_cards`. Both dispatch agents-platform runs — they belong in aw-app-agents-platform-runners.
 
 ## What It Delivers
 

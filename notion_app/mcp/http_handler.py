@@ -5,16 +5,18 @@ server whose every handler did nothing but forward to an awserv REST route;
 here the handlers call :class:`~notion_app.kanban.cards.KanbanBoard` directly,
 in-process, so there is no second hop and no second credential.
 
-Three of the monolith's eleven tools are deliberately absent —
-``attach_kanban_presentation``, ``invoke_kanban_agent`` and
-``run_ready_cards``. They are agents-platform / aw-app-presentations
-integration rather than Notion (see ``notion_app/kanban/cards.py``'s module
-docstring).
+Two of the monolith's eleven tools are deliberately absent —
+``invoke_kanban_agent`` and ``run_ready_cards``. Both dispatch and resume
+agents-platform runs, which is an orchestrator this app does not talk to (see
+``notion_app/kanban/cards.py``'s module docstring); they belong in
+aw-app-agents-platform-runners, not here.
 
-``attach_kanban_file`` was the fourth until it was ported: the monolith
-reached Notion's file-upload API through an awserv route that proxied the
-bytes, so it needed a stdlib multipart POST against ``/v1/file_uploads``
-before it could ship. That now lives in ``NotionClient.upload_file``.
+The other two of the monolith's original four gaps have since been ported.
+``attach_kanban_file`` needed a stdlib multipart POST against
+``/v1/file_uploads`` (the monolith got its body for free from ``requests``) —
+that is ``NotionClient.upload_file``. ``attach_kanban_presentation`` needed a
+call out to aw-app-presentations — that is ``notion_app/presentations.py``,
+and it is the only non-Notion service this app touches.
 
 Two are new: ``list_kanban_cards`` and ``get_kanban_card``. The monolith had
 no way for an agent to *read* the board at all — ``_list_kanban_cards``
@@ -261,6 +263,26 @@ TOOLS_SCHEMA: list[dict] = [
             "required": ["file_path"],
         },
     },
+    {
+        "name": "attach_kanban_presentation",
+        "description": (
+            "Attach an aw-presentation to a Kanban card: exports it to PNG and attaches "
+            "that as an image block, then appends a permanent share link right after it. "
+            "Prefer this over export_presentation_to_image + attach_kanban_file when what "
+            "you're attaching IS a presentation — the export alone goes stale the next "
+            "time the deck is edited, and this keeps a live link beside it.\n\n"
+            "Needs aw-app-presentations installed and able to render. If the workspace has "
+            "no published URL the image still lands, with shared=false explaining why."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "page_id": {"type": "string", "description": _PAGE_ID_DESC},
+                "presentation_id": {"type": "string", "description": "Id returned by create_presentation / list_presentations."},
+            },
+            "required": ["presentation_id"],
+        },
+    },
 ]
 
 
@@ -341,6 +363,13 @@ def _h_attach_file(board: KanbanBoard, args: dict) -> dict:
     return board.attach_file(page_id, args.get("file_path") or "")
 
 
+def _h_attach_presentation(board: KanbanBoard, args: dict) -> dict:
+    page_id = _page_id(args)
+    if not page_id:
+        raise ValueError("page_id is required")
+    return board.attach_presentation(page_id, args.get("presentation_id") or "")
+
+
 HANDLERS = {
     "list_kanban_cards": _h_list,
     "get_kanban_card": _h_get_card,
@@ -352,6 +381,7 @@ HANDLERS = {
     "set_qa_status": _h_qa,
     "set_blocker": _h_blocker,
     "attach_kanban_file": _h_attach_file,
+    "attach_kanban_presentation": _h_attach_presentation,
 }
 
 

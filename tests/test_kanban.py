@@ -370,16 +370,16 @@ def test_tools_list_matches_the_handler_table():
 
 
 def test_the_agents_platform_tools_are_not_advertised():
-    """These three need an orchestrator this app deliberately doesn't talk to
-    — advertising a tool that can't work is worse than not having it.
+    """These two dispatch agents-platform runs — an orchestrator this app
+    deliberately doesn't talk to. Advertising a tool that can't work is worse
+    than not having it.
 
-    ``attach_kanban_file`` used to be in this list; it is pure Notion once the
-    file-upload API is implemented, so it now ships.
+    The two attach_* tools used to be in this list. Both are implementable
+    without an orchestrator, so both now ship.
     """
     listed = {t["name"] for t in http_handler.TOOLS_SCHEMA}
-    assert listed.isdisjoint({"invoke_kanban_agent", "run_ready_cards",
-                              "attach_kanban_presentation"})
-    assert "attach_kanban_file" in listed
+    assert listed.isdisjoint({"invoke_kanban_agent", "run_ready_cards"})
+    assert {"attach_kanban_file", "attach_kanban_presentation"} <= listed
 
 
 def test_page_id_falls_back_to_the_gateway_injected_context():
@@ -636,3 +636,205 @@ def test_upload_file_refuses_something_notion_would_reject(monkeypatch):
         assert exc.status == 413
     else:
         raise AssertionError("expected NotionError")
+
+
+# ── attach_kanban_presentation ──────────────────────────────────────────
+# The one place this app calls a service that isn't Notion. What matters is
+# that the two halves degrade independently: the image is the payload, the
+# share link is a bonus, and neither failing should invent success.
+
+class FakePresentations:
+    def __init__(self, png_path="/tmp/deck.png", title="A deck",
+                 url="https://aw.example/api/apps/presentations/presentations/d1/html?token=t",
+                 export_error=None, share_error=None):
+        self.png_path, self.title, self.url = png_path, title, url
+        self.export_error, self.share_error = export_error, share_error
+        self.exported: list[str] = []
+        self.shared: list[str] = []
+
+    def export_png(self, presentation_id):
+        from notion_app.presentations import PresentationsUnavailable
+        if self.export_error:
+            raise PresentationsUnavailable(self.export_error)
+        self.exported.append(presentation_id)
+        return self.png_path, self.title
+
+    def share_url(self, presentation_id):
+        from notion_app.presentations import PresentationsUnavailable
+        if self.share_error:
+            raise PresentationsUnavailable(self.share_error)
+        self.shared.append(presentation_id)
+        return self.url
+
+
+def _board_with_presentations(pres, responses=None, config=None):
+    client = FakeClient(responses)
+    return KanbanBoard(client, KanbanConfig(FakeCtx(config)), pres), client
+
+
+def test_attach_presentation_appends_the_image_then_the_bookmark(tmp_path):
+    png = tmp_path / "deck.png"
+    png.write_bytes(b"\x89PNG deck")
+    pres = FakePresentations(png_path=str(png), title="Q4 review")
+    board, fake = _board_with_presentations(pres)
+
+    result = board.attach_presentation("page-1", "d1")
+
+    assert result["ok"] is True
+    assert result["shared"] is True
+    assert result["title"] == "Q4 review"
+    assert pres.exported == ["d1"] and pres.shared == ["d1"]
+
+    appends = [c for c in fake.calls if c[1] == "/blocks/page-1/children"]
+    assert len(appends) == 2, "image and bookmark are two separate appends"
+    # Order matters: the monolith put the link *after* the image so the card
+    # preview shows the picture, not a link chip.
+    assert appends[0][2]["children"][0]["type"] == "image"
+    bookmark = appends[1][2]["children"][0]
+    assert bookmark["type"] == "bookmark"
+    assert bookmark["bookmark"]["url"] == pres.url
+    assert "Q4 review" in bookmark["bookmark"]["caption"][0]["text"]["content"]
+
+
+def test_attach_presentation_still_attaches_when_there_is_no_share_link(tmp_path):
+    """A workspace with no published URL must not get a bookmark pointing at a
+    path — Notion would resolve it against notion.so."""
+    png = tmp_path / "deck.png"
+    png.write_bytes(b"\x89PNG deck")
+    pres = FakePresentations(png_path=str(png), url="")
+    board, fake = _board_with_presentations(pres)
+
+    result = board.attach_presentation("page-1", "d1")
+
+    assert result["ok"] is True
+    assert result["shared"] is False
+    assert "presentation_url" not in result
+    assert "note" in result
+    appends = [c for c in fake.calls if c[1] == "/blocks/page-1/children"]
+    assert len(appends) == 1
+    assert appends[0][2]["children"][0]["type"] == "image"
+
+
+def test_attach_presentation_survives_a_share_failure(tmp_path):
+    png = tmp_path / "deck.png"
+    png.write_bytes(b"\x89PNG deck")
+    pres = FakePresentations(png_path=str(png), share_error="share endpoint 500")
+    board, _ = _board_with_presentations(pres)
+
+    result = board.attach_presentation("page-1", "d1")
+
+    assert result["ok"] is True and result["shared"] is False
+    assert "share endpoint 500" in result["note"]
+
+
+def test_attach_presentation_reports_an_export_failure_as_a_failure():
+    pres = FakePresentations(export_error="aw-app-presentations cannot render right now")
+    board, fake = _board_with_presentations(pres)
+
+    result = board.attach_presentation("page-1", "d1")
+
+    assert result["ok"] is False
+    assert "cannot render" in result["error"]
+    assert fake.uploads == [], "nothing should have been uploaded"
+
+
+def test_attach_presentation_requires_a_presentation_id():
+    board, _ = _board_with_presentations(FakePresentations())
+    assert board.attach_presentation("page-1", "  ")["ok"] is False
+
+
+def test_attach_presentation_does_not_bookmark_a_png_it_could_not_attach(tmp_path):
+    """Export worked, the file didn't — a bookmark alone would claim the deck
+    is on the card when it isn't."""
+    pres = FakePresentations(png_path=str(tmp_path / "vanished.png"))
+    board, fake = _board_with_presentations(pres)
+
+    result = board.attach_presentation("page-1", "d1")
+
+    assert result["ok"] is False
+    assert [c for c in fake.calls if c[1] == "/blocks/page-1/children"] == []
+
+
+# ── the presentations client ────────────────────────────────────────────
+
+def test_client_calls_over_loopback_but_links_to_the_public_url(monkeypatch):
+    """The distinction this whole module exists for: calling through the
+    published URL would hit the tunnel edge's ~30s cut mid-render, and linking
+    to loopback would give the user a URL only the container can open."""
+    from notion_app import presentations as pres_mod
+
+    monkeypatch.setenv("AW_WORKSPACE_API_KEY", "k")
+    monkeypatch.setenv("AW_WORKSPACE_API_URL", "https://aw.example")
+    monkeypatch.delenv("AW_LOCAL_API_URL", raising=False)
+    monkeypatch.delenv("AW_PORT", raising=False)
+    seen = []
+
+    def fake_urlopen(req, timeout=None):
+        seen.append((req.full_url, timeout))
+        payload = (b'{"path":"/x/d1.png","title":"T"}' if req.full_url.endswith("/export")
+                   else b'{"token":"tok"}')
+
+        class R:
+            def read(self): return payload
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        return R()
+
+    monkeypatch.setattr(pres_mod.urllib.request, "urlopen", fake_urlopen)
+    c = pres_mod.PresentationsClient()
+
+    assert c.export_png("d1") == ("/x/d1.png", "T")
+    assert seen[0][0].startswith("http://127.0.0.1:9030/")
+    assert seen[0][1] == pres_mod.EXPORT_TIMEOUT_S
+
+    url = c.share_url("d1")
+    assert seen[1][0].startswith("http://127.0.0.1:9030/")
+    assert url == ("https://aw.example/api/apps/presentations/presentations"
+                   "/d1/html?token=tok")
+
+
+def test_client_returns_no_link_when_the_workspace_is_unpublished(monkeypatch):
+    from notion_app import presentations as pres_mod
+
+    monkeypatch.setenv("AW_WORKSPACE_API_KEY", "k")
+    monkeypatch.delenv("AW_WORKSPACE_API_URL", raising=False)
+    monkeypatch.setattr(pres_mod, "_from_env_file", lambda _n: None)
+
+    class R:
+        def read(self): return b'{"token":"tok"}'
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(pres_mod.urllib.request, "urlopen", lambda *a, **kw: R())
+    assert pres_mod.PresentationsClient().share_url("d1") == ""
+
+
+def test_client_names_the_service_it_could_not_reach(monkeypatch):
+    import urllib.error
+    from notion_app import presentations as pres_mod
+
+    monkeypatch.setenv("AW_WORKSPACE_API_KEY", "k")
+
+    def refused(*_a, **_kw):
+        raise urllib.error.URLError("Connection refused")
+
+    monkeypatch.setattr(pres_mod.urllib.request, "urlopen", refused)
+    try:
+        pres_mod.PresentationsClient().export_png("d1")
+    except pres_mod.PresentationsUnavailable as exc:
+        assert "aw-app-presentations" in str(exc)
+    else:
+        raise AssertionError("expected PresentationsUnavailable")
+
+
+def test_client_says_when_it_has_no_api_key(monkeypatch):
+    from notion_app import presentations as pres_mod
+
+    monkeypatch.delenv("AW_WORKSPACE_API_KEY", raising=False)
+    monkeypatch.setattr(pres_mod, "_from_env_file", lambda _n: None)
+    try:
+        pres_mod.PresentationsClient().export_png("d1")
+    except pres_mod.PresentationsUnavailable as exc:
+        assert "AW_WORKSPACE_API_KEY" in str(exc)
+    else:
+        raise AssertionError("expected PresentationsUnavailable")

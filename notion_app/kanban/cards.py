@@ -10,7 +10,12 @@ board". What is *not* here, and why:
   reimplementing them here would hardcode this app to one orchestrator.
 * the Telegram approval keyboard (``send_approval_batch``) — owned by the
   Agents Platform bot, reachable only from the monolith's network position.
-* ``attach_kanban_presentation`` — cross-app coupling to aw-app-presentations.
+
+``attach_presentation`` *is* here, and it is the one place this module reaches
+outside Notion: it calls aw-app-presentations over the workspace API (see
+``notion_app/presentations.py``). That coupling is app-to-app and optional —
+the client is injected, and a failure to reach it degrades to a clear error
+rather than taking the board down.
 
 ``create_card`` therefore creates the card and stops. The monolith's
 version created *and* notified *and* optionally dispatched, in one call; the
@@ -53,9 +58,13 @@ def _today() -> str:
 
 
 class KanbanBoard:
-    def __init__(self, client: NotionClient, config: KanbanConfig) -> None:
+    def __init__(self, client: NotionClient, config: KanbanConfig,
+                 presentations: Any = None) -> None:
         self.client = client
         self.config = config
+        # Injected so tests never touch the network, and lazy so that an app
+        # instance that never attaches a presentation never builds one.
+        self._presentations = presentations
 
     def _require_db(self) -> str:
         db_id = self.config.database_id
@@ -209,6 +218,64 @@ class KanbanBoard:
         return {"ok": True, "page_id": page_id, "filename": filename,
                 "bytes": len(content), "block_type": media_type,
                 "file_upload_id": upload_id}
+
+    @property
+    def presentations(self):
+        if self._presentations is None:
+            from ..presentations import PresentationsClient
+            self._presentations = PresentationsClient()
+        return self._presentations
+
+    def attach_presentation(self, page_id: str, presentation_id: str) -> dict:
+        """Attach a presentation to a card as a PNG *and* a live share link.
+
+        Both, not either: the export is a static snapshot that goes stale the
+        next time the deck is edited, and the link stays current but shows
+        nothing in the card preview. The monolith made the same call.
+
+        A failure to mint the share link does not sink the attachment — the
+        image is the part someone actually looks at, so a workspace with no
+        published URL still gets a usable card, with ``shared`` false saying
+        why.
+        """
+        presentation_id = (presentation_id or "").strip()
+        if not presentation_id:
+            return {"ok": False, "error": "presentation_id is required"}
+
+        from ..presentations import PresentationsUnavailable
+        try:
+            png_path, title = self.presentations.export_png(presentation_id)
+        except PresentationsUnavailable as exc:
+            return {"ok": False, "error": f"could not export the presentation — {exc}"}
+
+        attached = self.attach_file(page_id, png_path)
+        if not attached.get("ok"):
+            return attached
+
+        url = ""
+        share_error = ""
+        try:
+            url = self.presentations.share_url(presentation_id)
+        except PresentationsUnavailable as exc:
+            share_error = str(exc)
+
+        if url:
+            self.client.append_blocks(page_id, [{
+                "object": "block",
+                "type": "bookmark",
+                "bookmark": {"url": url, "caption": text_to_rich_text(
+                    f"Presentation: {title} ({presentation_id})")},
+            }])
+
+        result = {**attached, "presentation_id": presentation_id, "title": title,
+                  "shared": bool(url)}
+        if url:
+            result["presentation_url"] = url
+        else:
+            result["note"] = share_error or (
+                "Image attached, but no share link: this workspace has no published "
+                "URL, so any link written here would not resolve from Notion.")
+        return result
 
     def move_card(self, page_id: str, status: str, comment: str = "") -> dict:
         """Move a card's status, posting ``comment`` first if given.

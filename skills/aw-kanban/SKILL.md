@@ -123,13 +123,23 @@ download chip. Two things to know before you call it:
 - Notion's single-part upload stops at 20 MB. Bigger than that, link to it
   with `add_kanban_comment` instead and say plainly that it's a link.
 
-**Not ported yet, but should be:**
+**Attaching a presentation — use `attach_kanban_presentation`, not the two
+steps.** Pass a `presentation_id` and it exports the deck to PNG, attaches
+that as an image block, and appends a live share link right after it. Do it
+this way rather than `export_presentation_to_image` + `attach_kanban_file`:
+the export alone is a snapshot that goes stale the next time the deck is
+edited, and the pair keeps a current link beside the picture.
 
-- **`attach_kanban_presentation`.** It is `attach_kanban_file` plus a
-  cross-app call into aw-app-presentations (export to PNG, mint a share
-  link, append a bookmark block). Until it lands, do it in two steps:
-  `export_presentation_to_image` + `attach_kanban_file`, then
-  `share_presentation` + `add_kanban_comment` with the link.
+If the reply comes back with `shared: false`, the image landed but no link
+was written — either this workspace has no published URL, or the share call
+failed; the `note` says which. That is not a reason to retry the whole call,
+which would attach the image a second time.
+
+**Not ported here, on purpose:**
+
+- **`invoke_kanban_agent` / `run_ready_cards`.** Both dispatch and resume
+  agents-platform runs. This app doesn't talk to an orchestrator, so they
+  belong in aw-app-agents-platform-runners — ask there, not here.
 
 If a run genuinely needs the dispatch half (fire a run on `ready`, Telegram
 approval), that still lives in the monolith at

@@ -68,7 +68,9 @@
         "set_kanban_property",
         "get_kanban_properties",
         "set_qa_status",
-        "set_blocker"
+        "set_blocker",
+        "attach_kanban_file",
+        "attach_kanban_presentation"
       ]
     },
     "skills": [

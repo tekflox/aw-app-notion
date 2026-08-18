@@ -20,6 +20,7 @@ than silently doing nothing under a name that promises delivery.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -29,6 +30,7 @@ from .client import (
     build_property_payload,
     extract_property_value,
     heading_block,
+    notion_media_type,
     page_title,
     paragraph_blocks,
     split_text_blocks,
@@ -167,6 +169,46 @@ class KanbanBoard:
             return {"ok": False, "error": "text produced no content"}
         self.client.post_comment(page_id, rich_text)
         return {"ok": True, "page_id": page_id}
+
+    def attach_file(self, page_id: str, file_path: str) -> dict:
+        """Upload a local file and append it to the card as a block.
+
+        The monolith proxied the bytes through an awserv route; here the
+        upload goes straight to Notion from this process. The block type is
+        chosen from the extension — an image renders inline, a PDF gets a
+        viewer, everything else becomes a download chip.
+
+        ``file_path`` is read from this container's filesystem, so it has to
+        be a path this app can actually see: ``.tmp/`` and the mapped folders
+        are shared, a path inside another app's container is not.
+        """
+        file_path = (file_path or "").strip()
+        if not file_path:
+            return {"ok": False, "error": "file_path is required"}
+        if not os.path.isabs(file_path):
+            return {"ok": False, "error": f"file_path must be absolute, got '{file_path}'"}
+        if not os.path.isfile(file_path):
+            return {"ok": False, "error": (
+                f"no such file: {file_path} — note this reads the aw-workspace "
+                "filesystem, not the caller's")}
+
+        with open(file_path, "rb") as fh:
+            content = fh.read()
+        if not content:
+            return {"ok": False, "error": f"{file_path} is empty — nothing to attach"}
+
+        filename = os.path.basename(file_path)
+        upload_id = self.client.upload_file(filename, content)
+        media_type = notion_media_type(filename)
+        self.client.append_blocks(page_id, [{
+            "object": "block",
+            "type": media_type,
+            media_type: {"type": "file_upload",
+                         "file_upload": {"id": upload_id}, "caption": []},
+        }])
+        return {"ok": True, "page_id": page_id, "filename": filename,
+                "bytes": len(content), "block_type": media_type,
+                "file_upload_id": upload_id}
 
     def move_card(self, page_id: str, status: str, comment: str = "") -> dict:
         """Move a card's status, posting ``comment`` first if given.

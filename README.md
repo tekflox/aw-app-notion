@@ -89,7 +89,9 @@ The Kanban half comes from the monolith's `src/api/routes/notion_kanban.py`, `sr
 
 So `create_kanban_task` creates the card and stops, and `move_kanban_task(status="ready")` sets the status without dispatching anything. Both say so in their responses rather than quietly doing less than the name implies.
 
-**Not ported yet:** `attach_kanban_file` / `attach_kanban_presentation`. Attaching a real image/PDF block needs Notion's multipart file-upload API, which the monolith reached through an awserv route that proxied the bytes.
+`attach_kanban_file` **is** ported — the multipart upload against `/v1/file_uploads` that the monolith reached through an awserv byte-proxying route is now `NotionClient.upload_file`, stdlib-only like the rest of the client. Note the path is read from the aw-workspace filesystem, so a file generated in another container has to be written somewhere shared (`.tmp/`) first.
+
+**Not ported yet:** `attach_kanban_presentation` — it is `attach_kanban_file` plus a cross-app call into aw-app-presentations to export the PNG and mint the share link.
 
 ## What It Delivers
 

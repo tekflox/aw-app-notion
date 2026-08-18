@@ -5,15 +5,16 @@ server whose every handler did nothing but forward to an awserv REST route;
 here the handlers call :class:`~notion_app.kanban.cards.KanbanBoard` directly,
 in-process, so there is no second hop and no second credential.
 
-Four of the monolith's eleven tools are deliberately absent —
-``attach_kanban_presentation``, ``invoke_kanban_agent``, ``run_ready_cards``
-and ``attach_kanban_file``. The first three are agents-platform /
-aw-app-presentations integration rather than Notion (see
-``notion_app/kanban/cards.py``'s module docstring). ``attach_kanban_file``
-needs Notion's file-upload API, which the monolith reached through an awserv
-route that proxied the bytes; porting it means implementing multipart upload
-against ``/v1/file_uploads`` and is tracked as follow-up work rather than
-shipped half-done.
+Three of the monolith's eleven tools are deliberately absent —
+``attach_kanban_presentation``, ``invoke_kanban_agent`` and
+``run_ready_cards``. They are agents-platform / aw-app-presentations
+integration rather than Notion (see ``notion_app/kanban/cards.py``'s module
+docstring).
+
+``attach_kanban_file`` was the fourth until it was ported: the monolith
+reached Notion's file-upload API through an awserv route that proxied the
+bytes, so it needed a stdlib multipart POST against ``/v1/file_uploads``
+before it could ship. That now lives in ``NotionClient.upload_file``.
 
 Two are new: ``list_kanban_cards`` and ``get_kanban_card``. The monolith had
 no way for an agent to *read* the board at all — ``_list_kanban_cards``
@@ -240,6 +241,26 @@ TOOLS_SCHEMA: list[dict] = [
             "required": ["comment"],
         },
     },
+    {
+        "name": "attach_kanban_file",
+        "description": (
+            "Attach a local file to a Kanban card. Images (png/jpg/gif/webp/svg) render "
+            "inline, PDFs get a viewer, anything else becomes a download chip. Use this for "
+            "evidence a comment can't carry — a screenshot of the bug, a failing log, a "
+            "generated report.\n\n"
+            "The path is read from the aw-workspace filesystem, NOT from wherever you are "
+            "reading files: write the file to `.tmp/` (shared) first if you generated it "
+            "elsewhere. Max 20 MB."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "page_id": {"type": "string", "description": _PAGE_ID_DESC},
+                "file_path": {"type": "string", "description": "Absolute path to the file, e.g. '/opt/aw-workspace/.tmp/review/failing-test.png'."},
+            },
+            "required": ["file_path"],
+        },
+    },
 ]
 
 
@@ -313,6 +334,13 @@ def _h_blocker(board: KanbanBoard, args: dict) -> dict:
     return board.set_blocker(page_id, args.get("comment") or "")
 
 
+def _h_attach_file(board: KanbanBoard, args: dict) -> dict:
+    page_id = _page_id(args)
+    if not page_id:
+        raise ValueError("page_id is required")
+    return board.attach_file(page_id, args.get("file_path") or "")
+
+
 HANDLERS = {
     "list_kanban_cards": _h_list,
     "get_kanban_card": _h_get_card,
@@ -323,6 +351,7 @@ HANDLERS = {
     "get_kanban_properties": _h_get_props,
     "set_qa_status": _h_qa,
     "set_blocker": _h_blocker,
+    "attach_kanban_file": _h_attach_file,
 }
 
 

@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
+import os
 import re
+import secrets
 import threading
 import time
 import urllib.error
@@ -32,6 +35,14 @@ NOTION_VERSION = "2022-06-28"
 
 # Notion rejects any single rich_text object longer than this.
 RICH_TEXT_LIMIT = 2000
+
+# Notion accepts a single-part file upload up to 20 MB; past that its API
+# wants a multi-part flow with its own part-numbering handshake.
+MAX_SINGLE_PART_UPLOAD_BYTES = 20 * 1024 * 1024
+
+# Which Notion block type a filename becomes. Anything unrecognised is a
+# generic `file` block, which Notion renders as a download chip.
+_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 
 
 class NotionError(RuntimeError):
@@ -151,6 +162,84 @@ class NotionClient:
     def post_comment(self, page_id: str, rich_text: list[dict]) -> dict:
         return self.request("POST", "/comments",
                             {"parent": {"page_id": page_id}, "rich_text": rich_text})
+
+    # ── file upload ─────────────────────────────────────────────────────
+    def upload_file(self, filename: str, content: bytes,
+                    content_type: str | None = None) -> str:
+        """Push ``content`` through Notion's File Upload API, returning the
+        ``file_upload.id`` a block can then reference.
+
+        Two hops, per Notion's API: create an upload slot, then POST the
+        bytes to the ``upload_url`` it hands back. The second hop is
+        ``multipart/form-data`` and goes to an absolute URL, so it cannot go
+        through :meth:`request` (which is JSON-only and path-relative) — but
+        it still needs the same pacing, so it calls :meth:`_pace` itself.
+
+        The monolith used ``requests``' ``files=`` to build the multipart
+        body. This app is stdlib-only on purpose (see the module docstring),
+        so the body is assembled by hand below.
+        """
+        if not self.configured:
+            raise NotionError(401, "no Notion token saved — POST /api/apps/notion/settings first")
+        if len(content) > MAX_SINGLE_PART_UPLOAD_BYTES:
+            raise NotionError(413, (
+                f"{filename} is {len(content) / 1e6:.1f} MB — Notion's single-part upload "
+                f"tops out at {MAX_SINGLE_PART_UPLOAD_BYTES / 1e6:.0f} MB. Multi-part upload "
+                "is not implemented here; attach a smaller file or a link to it."))
+
+        content_type = content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        slot = self.request("POST", "/file_uploads",
+                            {"filename": filename, "content_type": content_type})
+        upload_id, upload_url = slot.get("id"), slot.get("upload_url")
+        if not upload_id or not upload_url:
+            raise NotionError(502, f"Notion returned no upload slot: {json.dumps(slot)[:300]}")
+
+        boundary = f"----awNotion{secrets.token_hex(16)}"
+        body = _multipart_body(boundary, "file", filename, content_type, content)
+        # Content-Type here MUST be the multipart type, not the client's
+        # default application/json — hence the hand-built header dict.
+        token = self._token_provider() or ""
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Notion-Version": NOTION_VERSION,
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        }
+        self._pace()
+        req = urllib.request.Request(upload_url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=max(self._timeout, 60)) as resp:
+                resp.read()
+        except urllib.error.HTTPError as e:
+            raise NotionError(e.code, e.read().decode("utf-8", "replace")) from None
+        except urllib.error.URLError as e:
+            raise NotionError(0, f"could not reach Notion's upload host: {e.reason}") from None
+        return upload_id
+
+
+def _multipart_body(boundary: str, field: str, filename: str,
+                    content_type: str, content: bytes) -> bytes:
+    """A single-file ``multipart/form-data`` body.
+
+    ``filename`` goes into a header, so a quote or newline in it would let a
+    caller inject extra parts. Callers pass a basename taken from a path the
+    user chose, so this sanitises rather than trusts.
+    """
+    safe = filename.replace('"', "'").replace("\r", " ").replace("\n", " ")
+    head = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="{field}"; filename="{safe}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode()
+    return head + content + f"\r\n--{boundary}--\r\n".encode()
+
+
+def notion_media_type(filename: str) -> str:
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in _IMAGE_EXTENSIONS:
+        return "image"
+    if ext == ".pdf":
+        return "pdf"
+    return "file"
 
 
 # ── text / property helpers (ported verbatim in behaviour) ──────────────

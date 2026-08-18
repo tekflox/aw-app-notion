@@ -68,6 +68,7 @@ class FakeClient:
 
     def __init__(self, responses=None):
         self.calls: list[tuple[str, str, dict | None]] = []
+        self.uploads: list[tuple[str, bytes, str | None]] = []
         self.responses = responses or {}
         self.configured = True
 
@@ -100,6 +101,10 @@ class FakeClient:
     def post_comment(self, page_id, rich_text):
         return self.request("POST", "/comments",
                             {"parent": {"page_id": page_id}, "rich_text": rich_text})
+
+    def upload_file(self, filename, content, content_type=None):
+        self.uploads.append((filename, content, content_type))
+        return f"upload-{len(self.uploads)}"
 
 
 class FakeCtx:
@@ -364,12 +369,17 @@ def test_tools_list_matches_the_handler_table():
     assert listed == set(http_handler.HANDLERS)
 
 
-def test_the_four_agents_platform_tools_are_not_advertised():
-    """They were never portable — advertising a tool that can't work is worse
-    than not having it."""
+def test_the_agents_platform_tools_are_not_advertised():
+    """These three need an orchestrator this app deliberately doesn't talk to
+    — advertising a tool that can't work is worse than not having it.
+
+    ``attach_kanban_file`` used to be in this list; it is pure Notion once the
+    file-upload API is implemented, so it now ships.
+    """
     listed = {t["name"] for t in http_handler.TOOLS_SCHEMA}
     assert listed.isdisjoint({"invoke_kanban_agent", "run_ready_cards",
-                              "attach_kanban_file", "attach_kanban_presentation"})
+                              "attach_kanban_presentation"})
+    assert "attach_kanban_file" in listed
 
 
 def test_page_id_falls_back_to_the_gateway_injected_context():
@@ -488,3 +498,141 @@ def test_a_non_429_error_is_not_retried(monkeypatch):
     except NotionError as exc:
         assert exc.status == 404
     assert len(calls) == 1
+
+
+# ── attach_kanban_file ──────────────────────────────────────────────────
+# The board half is covered with FakeClient; the upload half (hand-rolled
+# multipart, since this app is stdlib-only) is covered against a fake
+# urlopen, because that body is exactly what a `requests`-shaped port would
+# have got for free and is the easiest thing here to get subtly wrong.
+
+def test_attach_file_uploads_and_appends_an_image_block(tmp_path):
+    png = tmp_path / "shot.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    board, fake = _board()
+
+    result = board.attach_file("page-1", str(png))
+
+    assert result["ok"] is True
+    assert result["block_type"] == "image"
+    assert result["bytes"] == len(b"\x89PNG\r\n\x1a\nfake")
+    assert fake.uploads == [("shot.png", b"\x89PNG\r\n\x1a\nfake", None)]
+    method, path, body = fake.calls[-1]
+    assert (method, path) == ("PATCH", "/blocks/page-1/children")
+    block = body["children"][0]
+    assert block["type"] == "image"
+    assert block["image"]["file_upload"] == {"id": "upload-1"}
+
+
+def test_attach_file_block_type_follows_the_extension(tmp_path):
+    for name, expected in [("report.pdf", "pdf"), ("log.txt", "file"),
+                           ("diagram.svg", "image"), ("data.csv", "file"),
+                           ("PHOTO.JPEG", "image")]:
+        f = tmp_path / name
+        f.write_bytes(b"x")
+        board, fake = _board()
+        assert board.attach_file("page-1", str(f))["block_type"] == expected
+
+
+def test_attach_file_rejects_a_relative_path():
+    board, fake = _board()
+    result = board.attach_file("page-1", "notes/shot.png")
+    assert result["ok"] is False
+    assert "absolute" in result["error"]
+    assert fake.uploads == []
+
+
+def test_attach_file_rejects_a_missing_file(tmp_path):
+    board, fake = _board()
+    result = board.attach_file("page-1", str(tmp_path / "nope.png"))
+    assert result["ok"] is False
+    # The message has to say whose filesystem this is — "no such file" for a
+    # path the caller can see in its own shell is the confusing case.
+    assert "aw-workspace filesystem" in result["error"]
+    assert fake.uploads == []
+
+
+def test_attach_file_rejects_an_empty_file(tmp_path):
+    empty = tmp_path / "empty.png"
+    empty.write_bytes(b"")
+    board, fake = _board()
+    result = board.attach_file("page-1", str(empty))
+    assert result["ok"] is False
+    assert fake.uploads == []
+
+
+def test_attach_file_requires_a_page_id():
+    board, _ = _board()
+    try:
+        http_handler._h_attach_file(board, {"file_path": "/tmp/x.png"})
+    except ValueError as exc:
+        assert "page_id" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_upload_file_posts_a_well_formed_multipart_body(monkeypatch):
+    from notion_app.kanban import client as client_mod
+
+    sent = {}
+
+    def fake_urlopen(req, timeout=None):
+        if req.full_url.endswith("/file_uploads"):
+            class R:
+                def read(self): return b'{"id":"fu-1","upload_url":"https://up.notion/fu-1"}'
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+            return R()
+        sent["url"] = req.full_url
+        sent["headers"] = {k.lower(): v for k, v in req.headers.items()}
+        sent["body"] = req.data
+
+        class R2:
+            def read(self): return b""
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        return R2()
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", fake_urlopen)
+    c = client_mod.NotionClient(lambda: "ntn_x")
+    upload_id = c.upload_file("shot.png", b"BYTES")
+
+    assert upload_id == "fu-1"
+    assert sent["url"] == "https://up.notion/fu-1"
+    ctype = sent["headers"]["content-type"]
+    assert ctype.startswith("multipart/form-data; boundary=")
+    boundary = ctype.split("boundary=")[1]
+    body = sent["body"]
+    # The bytes must survive verbatim, and the envelope must close properly —
+    # Notion rejects a body whose final boundary is missing the -- suffix.
+    assert b"BYTES" in body
+    assert body.startswith(f"--{boundary}\r\n".encode())
+    assert body.endswith(f"\r\n--{boundary}--\r\n".encode())
+    assert b'name="file"; filename="shot.png"' in body
+    assert b"Content-Type: image/png" in body
+
+
+def test_upload_file_sanitises_a_filename_that_would_break_the_envelope():
+    from notion_app.kanban.client import _multipart_body
+
+    body = _multipart_body("BOUND", "file", 'ev"il\r\nname.png', "image/png", b"x")
+    header = body.split(b"\r\n\r\n")[0]
+    assert b'filename="ev\'il  name.png"' in header
+    assert header.count(b"Content-Disposition") == 1
+
+
+def test_upload_file_refuses_something_notion_would_reject(monkeypatch):
+    from notion_app.kanban import client as client_mod
+
+    def never(*_a, **_kw):
+        raise AssertionError("should not have reached the network")
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", never)
+    c = client_mod.NotionClient(lambda: "ntn_x")
+    oversize = b"x" * (client_mod.MAX_SINGLE_PART_UPLOAD_BYTES + 1)
+    try:
+        c.upload_file("big.bin", oversize)
+    except NotionError as exc:
+        assert exc.status == 413
+    else:
+        raise AssertionError("expected NotionError")

@@ -111,14 +111,25 @@ Only the Notion half is here.
   webhook traffic. There is no webhook here to piggyback on. The archive
   statuses still exist and can be set manually.
 
+**Attaching files — `attach_kanban_file` works now.**
+
+Pass an **absolute** path and it uploads the bytes to Notion and appends a
+block: images render inline, PDFs get a viewer, anything else becomes a
+download chip. Two things to know before you call it:
+
+- The path is read from **the aw-workspace filesystem**, not from wherever
+  you are reading files. If you generated the artefact inside another
+  container, write it to `.tmp/` first — that is shared — and pass that path.
+- Notion's single-part upload stops at 20 MB. Bigger than that, link to it
+  with `add_kanban_comment` instead and say plainly that it's a link.
+
 **Not ported yet, but should be:**
 
-- **`attach_kanban_file` / `attach_kanban_presentation`.** Attaching a real
-  image/PDF block to a card needs Notion's file-upload API (multipart against
-  `/v1/file_uploads`), which the monolith reached through an awserv route
-  that proxied the bytes. Left out rather than shipped half-working. Until
-  it lands, put artefacts somewhere linkable and use `add_kanban_comment`
-  with a markdown link — and say plainly that it's a link, not an attachment.
+- **`attach_kanban_presentation`.** It is `attach_kanban_file` plus a
+  cross-app call into aw-app-presentations (export to PNG, mint a share
+  link, append a bookmark block). Until it lands, do it in two steps:
+  `export_presentation_to_image` + `attach_kanban_file`, then
+  `share_presentation` + `add_kanban_comment` with the link.
 
 If a run genuinely needs the dispatch half (fire a run on `ready`, Telegram
 approval), that still lives in the monolith at

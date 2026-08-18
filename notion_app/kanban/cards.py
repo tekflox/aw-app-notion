@@ -127,6 +127,11 @@ class KanbanBoard:
             "priority": val("Priority"),
             "source": val("Source"),
             "agent_slug": val("AgentSlug"),
+            # The monolith's dispatch path read WorkflowSlug as the alternative
+            # to AgentSlug. Boards without the property just get None — but a
+            # summary that silently omits it makes a workflow card look like an
+            # undispatchable one to anything reading this shape.
+            "workflow_slug": val("WorkflowSlug"),
             "target_slug": val("TargetSlug"),
             "finding_key": val("FindingKey"),
             "tags": val("Tags"),

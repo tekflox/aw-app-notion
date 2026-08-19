@@ -323,6 +323,85 @@ def test_create_card_maps_ptbr_priority_labels():
     assert props["Priority"] == {"select": {"name": "High"}}
 
 
+# ── check_hint false-green gate (tooling:checkhint-false-green-on-missing-target) ──
+#
+# Documented (4 occurrences) as the recurring failure mode of Phase 1
+# saneamento: a hint that exits 0 because its target is ABSENT, not because
+# the issue was fixed. Since a skill's prose alone didn't stop it from
+# recurring, this is enforced at write time instead — create_card/set_property
+# refuse to save a hint matching one of the known-bad shapes.
+
+def test_create_card_rejects_negated_curl_short_circuit():
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": []},
+    })
+    result = board.create_card(
+        title="x", check_hint='! curl -s "http://127.0.0.1:9123/api/health" >/dev/null || grep -q foo bar.py')
+    assert result["ok"] is False
+    assert "false-green" in result["error"]
+    assert not [c for c in client.calls if c[1] == "/pages"]
+
+
+def test_create_card_rejects_bare_glob_length_check():
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": []},
+    })
+    result = board.create_card(
+        title="x", check_hint="python3 -c \"import glob,sys; sys.exit(0 if not glob.glob('/opt/x/*.py') else 1)\"")
+    assert result["ok"] is False
+    assert any("glob" in r for r in result["reasons"])
+
+
+def test_create_card_rejects_trivial_noop_hint():
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": []},
+    })
+    result = board.create_card(title="x", check_hint="true")
+    assert result["ok"] is False
+
+
+def test_create_card_accepts_a_hint_that_fails_closed():
+    """The counter-case: a hint scoped to a function via sed, no negated
+    network/grep, no glob — must NOT be rejected."""
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", "/pages"): {"id": "new-1"},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": []},
+    })
+    result = board.create_card(
+        title="x",
+        check_hint='! sed -n "/^def f/,/^def g/p" /opt/aw-workspace/src/x.py | grep -q "shutil.rmtree(dest)"')
+    assert result["ok"] is True
+
+
+def test_create_card_with_no_check_hint_is_not_gated():
+    """check_hint is optional — omitting it must not be treated as the
+    empty-hint risk (that only applies once a hint is actually supplied)."""
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", "/pages"): {"id": "new-1"},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": []},
+    })
+    result = board.create_card(title="x")
+    assert result["ok"] is True
+
+
+def test_set_property_rejects_a_risky_check_hint_rewrite():
+    board, client = _board({("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA}})
+    result = board.set_property("page-1", "CheckHint", "! grep -q SECRET /some/file")
+    assert result["ok"] is False
+    assert not [c for c in client.calls if c[0] == "PATCH"]
+
+
+def test_set_property_still_writes_other_properties_unfiltered():
+    board, client = _board({("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA}})
+    result = board.set_property("page-1", "Priority", "High")
+    assert result["ok"] is True
+
+
 def test_create_card_dedupes_by_finding_key_and_bumps_occurrence():
     board, client = _board({
         ("POST", f"/databases/{DB_ID}/query"): {"results": [_page(occ=2)]},

@@ -42,6 +42,7 @@ from .client import (
     status_property_name,
     text_to_rich_text,
 )
+from .check_hint_lint import lint_check_hint
 from .config import KanbanConfig
 
 log = logging.getLogger("aw_apps.notion.kanban")
@@ -177,6 +178,14 @@ class KanbanBoard:
 
     # ── write ───────────────────────────────────────────────────────────
     def set_property(self, page_id: str, property_name: str, value: Any) -> dict:
+        if property_name == "CheckHint" and isinstance(value, str) and value.strip():
+            risks = lint_check_hint(value)
+            if risks:
+                return {"ok": False,
+                        "error": "check_hint risks a false-green (tooling:checkhint-false-green-on-missing-target)",
+                        "reasons": risks,
+                        "hint": "rewrite so a missing/unreachable target fails closed (exit non-zero), "
+                                "not so it exits 0 by never actually checking"}
         db_id = self._require_db()
         schema = self.client.database_schema(db_id)
         spec = schema.get(property_name)
@@ -390,6 +399,14 @@ class KanbanBoard:
         title = (title or "").strip()
         if not title:
             return {"ok": False, "error": "title is required"}
+        if check_hint.strip():
+            risks = lint_check_hint(check_hint)
+            if risks:
+                return {"ok": False,
+                        "error": "check_hint risks a false-green (tooling:checkhint-false-green-on-missing-target)",
+                        "reasons": risks,
+                        "hint": "rewrite so a missing/unreachable target fails closed (exit non-zero), "
+                                "not so it exits 0 by never actually checking"}
         db_id = self._require_db()
         tags = tags or []
         input_text = input_text or f"Execute task: {title}"

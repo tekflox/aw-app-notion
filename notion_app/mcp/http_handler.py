@@ -31,6 +31,7 @@ import logging
 from fastapi.concurrency import run_in_threadpool
 
 from ..kanban.cards import KanbanBoard
+from ..kanban.check_hint_preflight import preflight_check_hint
 from ..kanban.client import NotionError
 
 log = logging.getLogger("aw_apps.notion.kanban")
@@ -213,6 +214,29 @@ TOOLS_SCHEMA: list[dict] = [
         },
     },
     {
+        "name": "verify_check_hint",
+        "description": (
+            "Preflight a card's check_hint BEFORE trusting its exit code (see "
+            "tooling:checkhint-false-green-on-missing-target — a hint whose referenced "
+            "path/host no longer exists exits 0 by never actually checking anything, not "
+            "because the issue is fixed). Extracts every absolute path and host:port "
+            "literal from the hint and confirms each actually exists/listens. Returns "
+            "verdict OK (safe to run the hint and trust its exit code) or UNVERIFIABLE "
+            "(every referenced target is missing/unreachable — do NOT run it, leave the "
+            "card open and say why). Does not execute the hint itself — that's still your "
+            "own Bash tool, unchanged. Pass page_id to read the hint off a card, or "
+            "check_hint to preflight an arbitrary string directly (e.g. before saving one "
+            "with set_kanban_property)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "page_id": {"type": "string", "description": _PAGE_ID_DESC + " Used to read the hint when check_hint isn't passed directly."},
+                "check_hint": {"type": "string", "description": "Preflight this string directly instead of reading it off a card."},
+            },
+        },
+    },
+    {
         "name": "set_qa_status",
         "description": (
             "MANDATORY for QA agents: call exactly once at the end of every QA review to "
@@ -355,6 +379,16 @@ def _h_get_props(board: KanbanBoard, args: dict) -> dict:
     return board.get_properties(page_id, args.get("properties") or None)
 
 
+def _h_verify_hint(board: KanbanBoard, args: dict) -> dict:
+    hint = args.get("check_hint")
+    if not hint:
+        page_id = _page_id(args)
+        if not page_id:
+            raise ValueError("pass either check_hint or page_id")
+        hint = board.get_properties(page_id, ["CheckHint"]).get("CheckHint") or ""
+    return preflight_check_hint(hint)
+
+
 def _h_qa(board: KanbanBoard, args: dict) -> dict:
     return board.set_qa_status(_page_id(args), args.get("status") or "",
                                args.get("comment") or "")
@@ -389,6 +423,7 @@ HANDLERS = {
     "add_kanban_comment": _h_comment,
     "set_kanban_property": _h_set_prop,
     "get_kanban_properties": _h_get_props,
+    "verify_check_hint": _h_verify_hint,
     "set_qa_status": _h_qa,
     "set_blocker": _h_blocker,
     "attach_kanban_file": _h_attach_file,

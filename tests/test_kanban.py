@@ -402,6 +402,41 @@ def test_set_property_still_writes_other_properties_unfiltered():
     assert result["ok"] is True
 
 
+# ── lint_check_hint: the two documented patterns not yet covered above ──────
+
+from notion_app.kanban.check_hint_lint import lint_check_hint  # noqa: E402
+
+
+def test_lint_rejects_negated_wget():
+    risks = lint_check_hint('! wget -q http://example.com -O /dev/null || echo ok')
+    assert any("wget" in r for r in risks)
+
+
+def test_lint_rejects_retired_monolith_path():
+    risks = lint_check_hint("test -f /opt/agentic-workspace/src/api/routes/x.py && echo found")
+    assert any("monolith" in r for r in risks)
+
+
+def test_lint_accepts_the_current_checkout_path_of_the_same_repo():
+    """The retired monolith is only a problem as the BARE `/opt/agentic-workspace`
+    root — the same repo checked out at repos/agentic-workspace (this
+    workspace's own path for it) must not trip the same rule."""
+    risks = lint_check_hint(
+        "test -f /opt/aw-workspace/repos/agentic-workspace/src/api/routes/x.py")
+    assert risks == []
+
+
+def test_lint_rejects_empty_hint():
+    assert lint_check_hint("") != []
+    assert lint_check_hint("   ") != []
+
+
+def test_lint_clean_hint_has_no_risks():
+    risks = lint_check_hint(
+        'sed -n "1,50p" /opt/aw-workspace/src/apps/fetch.py | grep -q "os.replace"')
+    assert risks == []
+
+
 def test_create_card_dedupes_by_finding_key_and_bumps_occurrence():
     board, client = _board({
         ("POST", f"/databases/{DB_ID}/query"): {"results": [_page(occ=2)]},

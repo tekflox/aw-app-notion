@@ -300,6 +300,29 @@ def heading_block(text: str) -> dict:
             "heading_2": {"rich_text": [{"type": "text", "text": {"content": text}}]}}
 
 
+# set_kanban_property's ``value`` argument is deliberately schemaless in the
+# MCP tool definition (it can be a bool, string, number, list or None), and
+# that ambiguity has a real cost: confirmed 2026-08-26, a real JSON `false` /
+# `true` / `null` sent through the gateway arrives here as the *string*
+# "false" / "true" / "null" — the MCP transport has nothing to type-check
+# against and falls back to text. `bool("false")` is `True`, so a naive
+# checkbox write silently flipped the wrong way while the tool still reported
+# `{"ok": true}`. Coerce those three exact literal spellings back to their
+# real values before they ever reach a type branch below; any other string
+# (including one that just happens to read "yes") is left untouched.
+_STRINGIFIED_LITERALS: dict[str, Any] = {"true": True, "false": False, "null": None}
+
+
+def coerce_transport_value(value: Any) -> Any:
+    """Undo the string-only coercion some MCP transports apply to a
+    schemaless argument. See ``_STRINGIFIED_LITERALS`` above for why this
+    exists — it is not defensive paranoia, it is the confirmed cause of
+    ``set_kanban_property`` silently no-op'ing on ``false``/``null``."""
+    if isinstance(value, str) and value in _STRINGIFIED_LITERALS:
+        return _STRINGIFIED_LITERALS[value]
+    return value
+
+
 def build_property_payload(prop_type: str, value: Any) -> dict:
     """Notion value wrapper for one property, given its schema ``type`` and a
     plain Python value. Raises ValueError for a type we can't set."""

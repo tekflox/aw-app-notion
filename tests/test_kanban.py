@@ -20,6 +20,7 @@ from notion_app.kanban.cards import KanbanBoard  # noqa: E402
 from notion_app.kanban.client import (  # noqa: E402
     NotionError,
     build_property_payload,
+    coerce_transport_value,
     extract_property_value,
     page_title,
     split_text_blocks,
@@ -282,6 +283,88 @@ def test_set_property_looks_up_the_type_from_the_live_schema():
     assert board.set_property("page-1", "is_live", True)["ok"] is True
     patch = [c for c in client.calls if c[0] == "PATCH"][0][2]
     assert patch["properties"]["is_live"] == {"checkbox": True}
+
+
+def _stateful_checkbox_board(prop_name="is_live", initial=True):
+    """A board whose fake Notion actually remembers what was patched, so a
+    test can read a property back instead of trusting the write's own
+    response — the response is exactly what lied in the original bug."""
+    state = {"checkbox": initial}
+
+    def get_page(_body):
+        return {"id": "page-1", "url": "https://notion.so/page-1",
+                "properties": {prop_name: {"type": "checkbox", "checkbox": state["checkbox"]}}}
+
+    def patch_page(body):
+        state["checkbox"] = body["properties"][prop_name]["checkbox"]
+        return {}
+
+    return _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("GET", "/pages/page-1"): get_page,
+        ("PATCH", "/pages/page-1"): patch_page,
+    })
+
+
+def test_set_property_checkbox_false_is_a_real_write_confirmed_by_read_back():
+    """Regression test for the bug where set_kanban_property(value=false)
+    returned {"ok": true} and left the checkbox true. Asserting on the
+    response alone would have passed against the broken code — the broken
+    code's response *also* claimed success. Only a read-back proves it."""
+    board, _ = _stateful_checkbox_board(initial=True)
+
+    result = board.set_property("page-1", "is_live", False)
+    assert result["ok"] is True
+    assert board.get_properties("page-1", ["is_live"])["is_live"] is False
+
+    result = board.set_property("page-1", "is_live", True)
+    assert result["ok"] is True
+    assert board.get_properties("page-1", ["is_live"])["is_live"] is True
+
+
+def test_set_property_tolerates_a_transport_stringified_boolean():
+    """Confirmed 2026-08-26 live: a real JSON `false` sent through the MCP
+    gateway arrives at this handler as the *string* "false" (the tool's
+    `value` argument is intentionally schemaless). `bool("false")` is True,
+    so the checkbox stayed on even though every layer reported ok. Assert
+    the fix by reading the property back, not by trusting the response."""
+    board, _ = _stateful_checkbox_board(initial=True)
+
+    result = board.set_property("page-1", "is_live", "false")
+    assert result["ok"] is True
+    assert result["value"] is False  # the response must say what it actually wrote
+    assert board.get_properties("page-1", ["is_live"])["is_live"] is False
+
+    result = board.set_property("page-1", "is_live", "true")
+    assert result["ok"] is True
+    assert result["value"] is True
+    assert board.get_properties("page-1", ["is_live"])["is_live"] is True
+
+
+def test_set_property_string_null_clears_like_a_real_none():
+    """The same stringification hits `value=null` — it arrived as the
+    literal string "null" and got written as rich-text content instead of
+    clearing the property."""
+    board, client = _board({("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA}})
+    result = board.set_property("page-1", "Priority", "null")
+    assert result["ok"] is True
+    assert result["value"] is None
+    patch = [c for c in client.calls if c[0] == "PATCH"][0][2]
+    assert patch["properties"]["Priority"] == {"select": None}
+
+
+def test_coerce_transport_value_only_touches_the_three_exact_literals():
+    """A genuine string that merely contains one of these words must pass
+    through untouched — this is a narrow transport-artifact fix, not a
+    general string-to-JSON parser."""
+    assert coerce_transport_value("false") is False
+    assert coerce_transport_value("true") is True
+    assert coerce_transport_value("null") is None
+    assert coerce_transport_value("False") == "False"  # wrong case: left alone
+    assert coerce_transport_value("nullable") == "nullable"
+    assert coerce_transport_value(False) is False
+    assert coerce_transport_value(None) is None
+    assert coerce_transport_value("Done") == "Done"
 
 
 def test_blocker_moves_to_need_human_and_says_no_telegram_was_sent():

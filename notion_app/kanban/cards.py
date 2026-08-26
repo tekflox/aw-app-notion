@@ -33,6 +33,7 @@ from .client import (
     NotionClient,
     NotionError,
     build_property_payload,
+    coerce_transport_value,
     extract_property_value,
     heading_block,
     notion_media_type,
@@ -178,6 +179,11 @@ class KanbanBoard:
 
     # ── write ───────────────────────────────────────────────────────────
     def set_property(self, page_id: str, property_name: str, value: Any) -> dict:
+        # Coerce first — everything downstream (the CheckHint linter, the
+        # payload builder, and the value echoed back below) must see the
+        # real value, not a transport-stringified "false"/"null" that would
+        # make this method both write and report the wrong thing.
+        value = coerce_transport_value(value)
         if property_name == "CheckHint" and isinstance(value, str) and value.strip():
             risks = lint_check_hint(value)
             if risks:

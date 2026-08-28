@@ -53,6 +53,51 @@ you deliberately want a *different* card.
 
 Need a page_id you don't have? `list_kanban_cards` — that's what it's for.
 
+## Put the evidence IN the card — this is not optional
+
+The card is the only thing the next agent reads. Your session's context —
+the files you opened, the command you ran, the log line that gave it away —
+is gone the moment your run ends. If it isn't written on the card, the QA
+agent, the reviewer, and whoever picks up the follow-up card all have to
+re-derive it by digging through the codebase from scratch. That rework is
+the single largest avoidable cost on this board, and it is paid every time,
+by everyone downstream.
+
+So before you move a card, `add_kanban_comment` with the evidence behind
+what you did:
+
+- **Where** — concrete `path/to/file.py:120` references for every file you
+  changed or that carries the root cause. Not "in the reconciler" — the
+  path and the line.
+- **Proof it works** — the exact command you ran and its real output
+  (test summary, exit code, curl response, the log line that flipped).
+  Paste the output, don't describe it. "Tests pass" is not evidence;
+  `14 passed in 3.2s` is.
+- **Root cause, not just the symptom** — one or two sentences on *why* it
+  was broken, so the next person doesn't re-diagnose it.
+- **What you rejected and why** — the approach you tried that didn't work
+  is worth as much as the one that did; without it, the next agent tries it
+  again.
+- **Anything you left undone** — out-of-scope bits, follow-ups, known
+  limitations. Say it plainly on the card rather than leaving it to be
+  discovered.
+- **Artefacts** — screenshots, diffs, reports, logs go on the card with
+  `attach_kanban_file` (absolute path, read from the aw-workspace
+  filesystem — see below). A path in a comment pointing at a file nobody
+  else can reach is not evidence.
+
+A comment that says only "done, fixed it" is a defect in the delivery, even
+when the code is right. Same rule for QA and blockers: `set_qa_status` and
+`set_blocker` both take a comment — say *what you checked* and *what you
+saw*, so a rejection can be acted on without re-running the whole review,
+and a blocker names the exact missing tool, permission or ambiguity rather
+than "couldn't proceed".
+
+Write it while you still have the context, not from memory at the end of a
+long run. Long output is fine — `add_kanban_comment` chunks past Notion's
+2000-char limit for you, and an over-long comment costs nothing next to a
+re-investigation.
+
 ## Tool reference
 
 | Tool | Use it to |

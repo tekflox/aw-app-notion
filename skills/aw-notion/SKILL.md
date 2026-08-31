@@ -3,8 +3,8 @@ name: aw-notion
 description: >-
   How to use the Notion MCP tools exposed through MCP Gateway once the
   aw-app-notion app is installed and a token is saved. Covers tool names
-  (query-data-source, retrieve-page-markdown, update-page-markdown,
-  move-page, search, comments, ...), the mcp-gateway tool-name prefix, page
+  (API-query-data-source, API-retrieve-page-markdown, API-update-page-markdown,
+  API-move-page, API-post-search, comments, ...), the mcp-gateway tool-name prefix, page
   vs data-source IDs, and what has to be shared with the Notion integration
   before any tool call can see it. Load this whenever a task needs to
   read/write a Notion page or database. NOT the same as aw-kanban (that
@@ -24,7 +24,7 @@ prefixed the same way every other upstream is (see `aw-kanban/SKILL.md` for
 the general prefix convention if unfamiliar):
 
 ```
-mcp__aw-gateway__notion__<tool-name>
+mcp__aw-gateway__aw__notion__API-<tool-name>
 ```
 
 ## Before calling anything: is there a token, and can it see the page?
@@ -50,35 +50,36 @@ see this app's README ("no automatic hot-reload for the token" — a
 deliberate trade-off to avoid ever routing the token through aw-workspace's
 plain, potentially cloud-synced app config, same reasoning as aw-app-git's
 `github_token`). Reinstall/restart the **MCP Gateway** app if
-`notion__search` (or any other `notion__*` tool) isn't showing up yet after
-a fresh save.
+`aw__notion__API-post-search` (or any other `aw__notion__API-*` tool) isn't
+showing up yet after a fresh save.
 
 ## Tool surface (v2.0.0 of @notionhq/notion-mcp-server)
 
 Confirmed tool names, from the upstream project's own docs — this is NOT
-the full list (the package ships ~22 tools total; the ones below are the
+the full list (the package ships 24 tools total; the ones below are the
 ones documented by name upstream as of this port). When in doubt, list the
 gateway's actual `tools/list` output rather than trusting this table blind
 — the upstream package can add/rename tools between versions.
 
 | Tool | Use it to |
 |---|---|
-| `search` | Find pages/databases by title/content across the workspace (only what's shared with the integration). Start here when you don't already have a page/database ID. |
-| `retrieve-page-markdown` | Read a page's content as Markdown — the cheap way to read, no block-tree parsing needed. |
-| `update-page-markdown` | Edit a page's content via Markdown. |
-| `move-page` | Relocate a page to a different parent page/database. |
-| `retrieve-a-database` | Get a database's metadata, including its data source IDs (a database's actual rows now live under one or more "data sources" — 2025 API model, not the old flat-database shape). |
-| `retrieve-a-data-source` / `update-a-data-source` / `create-a-data-source` | Read/modify/create a database's schema (properties, not rows). |
-| `query-data-source` | Query rows with filters/sorts — the equivalent of the old "query a database" call. |
-| `list-data-source-templates` | See templates available for a data source. |
-| comment tools | Read/post comments on a page — exact tool name not confirmed at port time; check `tools/list`. |
+| `API-post-search` | Find pages/databases by title/content across the workspace (only what's shared with the integration). Start here when you don't already have a page/database ID. |
+| `API-retrieve-page-markdown` | Read a page's content as Markdown — the cheap way to read, no block-tree parsing needed. |
+| `API-update-page-markdown` | Edit a page's content via Markdown. |
+| `API-move-page` | Relocate a page to a different parent page/database. |
+| `API-retrieve-a-database` | Get a database's metadata, including its data source IDs (a database's actual rows now live under one or more "data sources" — 2025 API model, not the old flat-database shape). |
+| `API-retrieve-a-data-source` / `API-update-a-data-source` / `API-create-a-data-source` | Read/modify/create a database's schema (properties, not rows). |
+| `API-query-data-source` | Query rows with filters/sorts — the equivalent of the old "query a database" call. |
+| `API-list-data-source-templates` | See templates available for a data source. |
+| `API-create-a-comment` / `API-retrieve-a-comment` | Post/read comments on a page. |
 
 ## IDs
 
 Notion page/database/data-source IDs are UUIDs, usually visible in the
 page's URL (the last dash-stripped 32-hex-char segment) or returned by
-`search`. `retrieve-a-database` is the bridge from a database ID (what a
-URL gives you) to its data source ID (what `query-data-source` wants).
+`API-post-search`. `API-retrieve-a-database` is the bridge from a database ID
+(what a URL gives you) to its data source ID (what `API-query-data-source`
+wants).
 
 ## Comparison: this vs. aw-kanban
 

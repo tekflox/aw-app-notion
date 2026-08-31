@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "notion",
   "name": "Notion",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Ports agentic-workspace's Notion integration into aw-workspace: stores a Notion internal-integration token in the zero-knowledge secret store and generates the mcp.json entries MCP Gateway scans \u2014 both the generic @notionhq/notion-mcp-server and this app's own aw-kanban server, which turns a Notion database into the Agents Kanban board (list/create/move/comment on cards, set QA status, flag blockers).",
   "icon": "book-open",
   "tier": "inprocess",

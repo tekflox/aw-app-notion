@@ -112,6 +112,39 @@ re-investigation.
 | `set_qa_status` | QA-only, MANDATORY once at the end of every review: `done` / `ready_to_deploy` / `need_human`. Stamps `QAStatus` and moves the card. With no card for this run it's a no-op on Notion but still records the verdict — call it every time. |
 | `set_blocker` | The moment you're stuck (missing tool, missing access, ambiguous ask): posts a `🚧 Blocker` comment and moves to `need_human`. Don't burn retries hunting for a workaround first. |
 
+## Kicking off work on a card — dispatch directly, don't wait on a status move
+
+Moving a card to `ready` (or any status) only changes the property — see
+"No `start_now`, no run dispatch" below. If you're driving a card through
+actual work (the Dev Team flow, or any agents-platform agent), fire the
+dispatch yourself:
+
+```
+run_agent_async(slug="product-owner", input="...",
+                 target_slug="<target>", notion_task_id="<page_id>")
+```
+
+`notion_task_id` is what wires the run to this card (the agent gets it as
+`NOTION_TASK_ID`, and `aw-kanban` tool calls from inside that run
+auto-target this card without needing `page_id`). That belongs to the
+`agents_platform_runners` MCP server, not this one — see the `aw-agents`
+skill for the full dispatch/monitoring contract.
+
+## Monitoring dispatched work — don't poll `list_kanban_cards` in a loop
+
+Once you've dispatched a run against a card, the **Supervisor tool**
+(`agents_platform_runners`, see the `aw-supervisor-tool` skill) is how you
+find out when it's done without polling: `supervise(session_id=...)` watches
+that run's *entire* chain — including every hop it hands off to internally
+(e.g. Product Owner → Architect → Coder → QA in the Dev Team flow) — and
+wakes your session once when the whole thing goes idle. That matters
+specifically for a Kanban-driven delivery: `run_agent_async`'s own
+`call_me_back` (on by default) only fires when the run *you* dispatched
+ends its own turn, which for a flow node is often right after it hands off
+to the next agent — not when the card actually finishes moving through the
+board. Reach for `supervise()`, not repeated `list_kanban_cards`/
+`get_kanban_card` calls, to know when to look at the card again.
+
 ## Status keys
 
 Logical keys map to Notion option names via the app's `kanban_statuses`

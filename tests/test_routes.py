@@ -104,7 +104,12 @@ def test_logout_clears_secret_and_disables_mcp_server():
 
         resp = client.post("/logout")
         assert resp.status_code == 200
-        assert resp.json() == {"ok": True, "logged_in": False, "configured": False}
+        body = resp.json()
+        # `apmt` (the AP-MT copy's delete result) is also in the body now —
+        # asserted in test_apmt.py, which owns that behaviour; here the point
+        # is still just that the local logout worked.
+        assert {k: body[k] for k in ("ok", "logged_in", "configured")} == {
+            "ok": True, "logged_in": False, "configured": False}
         assert ctx.secrets.read("notion_token") is None
 
         doc = json.loads((tmp_path / "mcp.json").read_text())

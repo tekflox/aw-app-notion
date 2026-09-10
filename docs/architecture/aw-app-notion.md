@@ -3,7 +3,7 @@ repo: architecture
 path: docs/architecture/aw-app-notion.md
 source: generated
 edited: false
-checksum: sha256:97b9eea4a13ed9da53a85051b455ecd567a48ab61eb10d1d4adc5dc953ee5b4d
+checksum: sha256:8329355239f53222934d13a5c8f2f12ddba6650108ff3790f986722ae6a86764
 ---
 # Notion
 
@@ -16,6 +16,7 @@ Ports agentic-workspace's Notion integration into aw-workspace: stores a Notion 
 
 ## Connections
 - `http` → **aw-workspace** — routes mounted at /api/apps/notion
+- `other` → **aw-app-agents-platform-runners** — Optional: when present, this app pushes a derived copy of the Notion token to agents-platform-multitenant through that app's /notion-token routes (it owns the AP-MT address and identity token), so the control plane can reach Notion for this tenant while this workspace is offline
 - `stdio-mcp` → **mcp-gateway** — MCP surface aggregated by the gateway
 
 ## MCP tools

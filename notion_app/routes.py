@@ -30,7 +30,7 @@ from __future__ import annotations
 from fastapi import Body, FastAPI
 from fastapi.responses import JSONResponse, Response
 
-from . import mcp_config, sync as sync_mod
+from . import apmt as apmt_mod, mcp_config, sync as sync_mod
 from .job import SyncJob
 from .kanban.cards import KanbanBoard
 from .kanban.client import NotionClient, NotionError
@@ -93,19 +93,61 @@ def build_routes(ctx) -> FastAPI:
             return {"error": f"{TOKEN_KEY} is required"}
         ctx.secrets.write(TOKEN_KEY, token)
         doc = mcp_config.write_mcp_json(ctx.package_dir, token)
+        # Push the derived copy to agents-platform-multitenant (see apmt.py).
+        # Deliberately NOT fatal: this app remains the source of truth, the
+        # save has already succeeded locally, and the 360s reconcile repairs
+        # a failed push without anyone doing anything. Reported in the body
+        # so a failure is visible rather than only in a log.
+        try:
+            apmt = {"pushed": True, **apmt_mod.push_token(token)}
+        except apmt_mod.ApmtSyncError as exc:
+            apmt = {"pushed": False, "reason": str(exc)}
         return {
             "ok": True,
             "logged_in": True,
             "configured": True,
             "mcp_server_enabled": bool(doc["mcpServers"]),
             "mcp_servers": sorted(doc["mcpServers"].keys()),
+            "apmt": apmt,
         }
 
     @app.post("/logout")
-    async def clear_token() -> dict:
+    async def clear_token():
+        """Disconnect Notion — locally AND in the control plane.
+
+        The remote delete goes FIRST and a failure aborts the logout with the
+        local token intact. Deleting locally first would leave the only copy
+        of the token that can prove what to revoke in a service this app can
+        no longer name, and would report success while a live token kept
+        working — "I disconnected Notion" has to mean it everywhere or say so.
+        Retrying the logout is safe: the remote delete is idempotent.
+        """
+        try:
+            apmt = {"deleted": True, **apmt_mod.delete_token()}
+        except apmt_mod.ApmtNotConfigured as exc:
+            # No relay, therefore no remote copy to leave behind — the normal
+            # state of a workspace that never pushed one. Logging out here is
+            # not a lie, so it proceeds; the reason is still reported.
+            apmt = {"deleted": False, "reason": str(exc)}
+        except apmt_mod.ApmtSyncError as exc:
+            return JSONResponse(
+                {"ok": False, "logged_in": True, "configured": True,
+                 "error": "the Notion token could not be deleted from "
+                          f"agents-platform-multitenant, so it is still live there: {exc}",
+                 "apmt": {"deleted": False, "reason": str(exc)}},
+                status_code=502)
         ctx.secrets.delete(TOKEN_KEY)
         mcp_config.write_mcp_json(ctx.package_dir, None)
-        return {"ok": True, "logged_in": False, "configured": False}
+        return {"ok": True, "logged_in": False, "configured": False, "apmt": apmt}
+
+    @app.post("/apmt/sync")
+    async def apmt_sync() -> dict:
+        """Reconcile AP-MT's derived copy of the token against this app's own
+        (see apmt.reconcile). Called every ``RECONCILE_INTERVAL_S`` (360s) by
+        aw-app-agents-platform-runners' existing skills-sync watchdog, which
+        is why there is no scheduler here; also a manual retry after a failed
+        push or a half-failed logout."""
+        return apmt_mod.reconcile(ctx.secrets.read(TOKEN_KEY))
 
     @app.get("/mcp.json")
     async def mcp_json() -> dict:

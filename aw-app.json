@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "notion",
   "name": "Notion",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Ports agentic-workspace's Notion integration into aw-workspace: stores a Notion internal-integration token in the zero-knowledge secret store and generates the mcp.json entries MCP Gateway scans \u2014 both the generic @notionhq/notion-mcp-server and this app's own aw-kanban server, which turns a Notion database into the Agents Kanban board (list/create/move/comment on cards, set QA status, flag blockers).",
   "icon": "book-open",
   "tier": "inprocess",
@@ -141,7 +141,7 @@
       {
         "id": "agents-platform-runners",
         "required": false,
-        "reason": "Optional: when present, this app pushes a derived copy of the Notion token to agents-platform-multitenant through that app's /notion-token routes (it owns the AP-MT address and identity token), so the control plane can reach Notion for this tenant while this workspace is offline. Absent, every push/delete/reconcile reports 'not installed' and the token simply stays local — nothing here depends on it."
+        "reason": "Optional: when present, this app pushes a derived copy of the Notion token to agents-platform-multitenant through that app's /notion-token routes (it owns the AP-MT address and identity token), so the control plane can reach Notion for this tenant while this workspace is offline. Absent, every push/delete/reconcile reports 'not installed' and the token simply stays local \u2014 nothing here depends on it."
       }
     ],
     "note": "Runtime-enforced app dependency: aw-workspace installs/loads mcp-gateway before notion so the gateway can scan notion/mcp.json."

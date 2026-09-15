@@ -98,6 +98,7 @@
       {
         "name": "Sync: Notion",
         "type": "terminal",
+        "enabled": true,
         "prompt": "aw-workspace-cli notion-sync --bidirectional",
         "schedules": [
           {

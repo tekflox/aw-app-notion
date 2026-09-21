@@ -146,3 +146,77 @@ def test_build_mcp_servers_also_advertises_kanban():
     kanban = servers["aw-kanban"]
     assert kanban["type"] == "http"
     assert kanban["url"].endswith(":9030/api/apps/notion/mcp")
+
+
+# ── GET /bot (Kanban "auto-criar sweep de Ready cards + automatizar/
+# verificar webhook do Notion") — aw-app-agents-platform-runners' loopback
+# read of this workspace's Notion bot identity, since it cannot read this
+# app's own token. ─────────────────────────────────────────────────────────
+
+
+def test_bot_without_a_token_is_409():
+    with tempfile.TemporaryDirectory() as tmp:
+        client, _ctx = _client(Path(tmp))
+        resp = client.get("/bot")
+        assert resp.status_code == 409
+
+
+def test_bot_translates_users_me_into_workspace_and_integration_ids(monkeypatch):
+    from notion_app.kanban import client as client_mod
+
+    class FakeResp:
+        status = 200
+
+        def read(self):
+            return json.dumps({
+                "id": "bot-id-123",
+                "object": "user",
+                "type": "bot",
+                "bot": {"workspace_id": "ws-abc", "workspace_name": "AW Dev"},
+            }).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    seen = []
+
+    def fake_urlopen(req, timeout=None):
+        seen.append(req.full_url)
+        return FakeResp()
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", fake_urlopen)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        client, ctx = _client(Path(tmp))
+        ctx.secrets.write("notion_token", "ntn_test123")
+        resp = client.get("/bot")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"integration_id": "bot-id-123", "workspace_id": "ws-abc",
+                           "workspace_name": "AW Dev"}
+    assert seen[0].endswith("/users/me")
+
+
+def test_bot_surfaces_notions_own_error_status(monkeypatch):
+    """404/401 from Notion has to reach the caller as-is — same
+    "surface Notion's own status" contract every other _kanban-wrapped
+    route here already keeps (see test_mcp_surfaces_notions_own_error_body
+    in test_kanban.py)."""
+    import urllib.error
+
+    from notion_app.kanban import client as client_mod
+
+    def boom(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 401, "unauthorized", {}, None)
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", boom)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        client, ctx = _client(Path(tmp))
+        ctx.secrets.write("notion_token", "ntn_test123")
+        resp = client.get("/bot")
+
+    assert resp.status_code == 401

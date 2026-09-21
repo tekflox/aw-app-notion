@@ -140,6 +140,40 @@ def build_routes(ctx) -> FastAPI:
         mcp_config.write_mcp_json(ctx.package_dir, None)
         return {"ok": True, "logged_in": False, "configured": False, "apmt": apmt}
 
+    @app.get("/bot")
+    async def bot_identity():
+        """Read-only: this workspace's Notion bot identity, translated to the
+        two ids agents-platform-multitenant's NotionSubscription mapping
+        needs (Kanban "auto-criar sweep de Ready cards + automatizar/
+        verificar webhook do Notion"). aw-app-agents-platform-runners calls
+        this over loopback because it cannot read THIS app's Notion token —
+        same boundary notion_token_sync.py already respects — see that
+        app's notion_subscription.py for the caller.
+
+        Notion's GET /v1/users/me for a bot integration carries no field
+        literally named "integration_id" (verified against
+        developers.notion.com/reference/get-self, 2026-09-21) — the bot's
+        own top-level "id" IS what a webhook delivery's "integration_id"
+        names (both identify the same internal-integration bot). "workspace_id"
+        is bot.workspace_id, which Notion added specifically so an
+        integration can discover it without the workspace owner's admin
+        dashboard.
+        """
+        if not client.configured:
+            return JSONResponse({"ok": False, "error": "no Notion token saved"},
+                                status_code=409)
+
+        def _fetch_bot() -> dict:
+            me = client.request("GET", "/users/me")
+            bot = me.get("bot") or {}
+            return {
+                "integration_id": me.get("id") or "",
+                "workspace_id": bot.get("workspace_id") or "",
+                "workspace_name": bot.get("workspace_name") or "",
+            }
+
+        return _kanban(_fetch_bot)
+
     @app.post("/apmt/sync")
     async def apmt_sync() -> dict:
         """Reconcile AP-MT's derived copy of the token against this app's own

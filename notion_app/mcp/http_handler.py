@@ -45,6 +45,12 @@ _PAGE_ID_DESC = (
     "to target a different card."
 )
 
+_UPLOAD_PAGE_ID_DESC = (
+    "Notion page id to attach the file to — any page the integration can see, not "
+    "just a Kanban card. Optional — auto-filled from this run's Kanban-card context "
+    "(NOTION_TASK_ID) when omitted; pass it explicitly to target any other page."
+)
+
 
 def _ok(req_id, text: str) -> dict:
     return {"jsonrpc": "2.0", "id": req_id,
@@ -298,6 +304,30 @@ TOOLS_SCHEMA: list[dict] = [
         },
     },
     {
+        "name": "upload_file_to_page",
+        "description": (
+            "Upload a local file into Notion and attach it to a page as a file block — "
+            "the general-purpose sibling of attach_kanban_file for any Notion page the "
+            "integration has been shared with, not just a Kanban card (e.g. filing a PDF "
+            "someone sent you under an existing Notion page). Images (png/jpg/gif/webp/svg) "
+            "render inline, PDFs get a viewer, anything else becomes a download chip. Runs "
+            "Notion's create-upload-slot → send-bytes → attach-to-page flow in a single "
+            "call, since Notion deletes an uploaded file that isn't attached within 1 hour.\n\n"
+            "The path is read from the aw-workspace filesystem, NOT from wherever you are "
+            "reading files: write the file to `.tmp/` (shared) first if you generated it "
+            "elsewhere. Max 20 MB — Notion's single-part upload ceiling."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "page_id": {"type": "string", "description": _UPLOAD_PAGE_ID_DESC},
+                "file_path": {"type": "string", "description": "Absolute path to the file, e.g. '/opt/aw-workspace/.tmp/review/report.pdf'."},
+                "caption": {"type": "string", "description": "Optional caption shown under the attached file in Notion."},
+            },
+            "required": ["file_path"],
+        },
+    },
+    {
         "name": "attach_kanban_presentation",
         "description": (
             "Attach an aw-presentation to a Kanban card: exports it to PNG and attaches "
@@ -408,6 +438,13 @@ def _h_attach_file(board: KanbanBoard, args: dict) -> dict:
     return board.attach_file(page_id, args.get("file_path") or "")
 
 
+def _h_upload_file_to_page(board: KanbanBoard, args: dict) -> dict:
+    page_id = _page_id(args)
+    if not page_id:
+        raise ValueError("page_id is required")
+    return board.attach_file(page_id, args.get("file_path") or "", args.get("caption") or "")
+
+
 def _h_attach_presentation(board: KanbanBoard, args: dict) -> dict:
     page_id = _page_id(args)
     if not page_id:
@@ -427,6 +464,7 @@ HANDLERS = {
     "set_qa_status": _h_qa,
     "set_blocker": _h_blocker,
     "attach_kanban_file": _h_attach_file,
+    "upload_file_to_page": _h_upload_file_to_page,
     "attach_kanban_presentation": _h_attach_presentation,
 }
 

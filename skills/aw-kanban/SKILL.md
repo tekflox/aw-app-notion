@@ -201,6 +201,11 @@ download chip. Two things to know before you call it:
 - Notion's single-part upload stops at 20 MB. Bigger than that, link to it
   with `add_kanban_comment` instead and say plainly that it's a link.
 
+Attaching a file to a Notion page that **isn't** a Kanban card? Same
+mechanism, different tool: `upload_file_to_page(page_id, file_path, caption=None)`,
+served from this same `aw-kanban` server — see the `aw-notion` skill's
+"Attaching a real file" section.
+
 **Attaching a presentation — use `attach_kanban_presentation`, not the two
 steps.** Pass a `presentation_id` and it exports the deck to PNG, attaches
 that as an image block, and appends a live share link right after it. Do it

@@ -224,13 +224,16 @@ class KanbanBoard:
         self.client.post_comment(page_id, rich_text)
         return {"ok": True, "page_id": page_id}
 
-    def attach_file(self, page_id: str, file_path: str) -> dict:
-        """Upload a local file and append it to the card as a block.
+    def attach_file(self, page_id: str, file_path: str, caption: str = "") -> dict:
+        """Upload a local file and append it to a page as a block.
 
-        The monolith proxied the bytes through an awserv route; here the
-        upload goes straight to Notion from this process. The block type is
-        chosen from the extension — an image renders inline, a PDF gets a
-        viewer, everything else becomes a download chip.
+        Works against any Notion page the integration can see, not just a
+        Kanban card — ``page_id`` is taken as given, nothing here is
+        board-specific. The upload goes straight to Notion from this
+        process; the monolith proxied the bytes through an awserv route
+        instead. The block type is chosen from the extension — an image
+        renders inline, a PDF gets a viewer, everything else becomes a
+        download chip.
 
         ``file_path`` is read from this container's filesystem, so it has to
         be a path this app can actually see: ``.tmp/`` and the mapped folders
@@ -258,7 +261,8 @@ class KanbanBoard:
             "object": "block",
             "type": media_type,
             media_type: {"type": "file_upload",
-                         "file_upload": {"id": upload_id}, "caption": []},
+                         "file_upload": {"id": upload_id},
+                         "caption": text_to_rich_text(caption) if caption else []},
         }])
         return {"ok": True, "page_id": page_id, "filename": filename,
                 "bytes": len(content), "block_type": media_type,

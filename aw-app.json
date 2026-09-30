@@ -72,6 +72,7 @@
         "set_qa_status",
         "set_blocker",
         "attach_kanban_file",
+        "upload_file_to_page",
         "attach_kanban_presentation"
       ]
     },

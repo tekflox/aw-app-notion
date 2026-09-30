@@ -73,6 +73,32 @@ gateway's actual `tools/list` output rather than trusting this table blind
 | `API-list-data-source-templates` | See templates available for a data source. |
 | `API-create-a-comment` / `API-retrieve-a-comment` | Post/read comments on a page. |
 
+## Attaching a real file (PDF, image, …) to a page
+
+None of the upstream `API-*` tools above can upload bytes — Notion's own
+`@notionhq/notion-mcp-server` has no file-upload tool. That gap is filled by
+`upload_file_to_page`, served from this app's **other** MCP server
+(`aw-kanban`, over Streamable HTTP — see `aw-kanban/SKILL.md` for the prefix
+convention), reachable as
+`mcp__aw-gateway__aw__aw_kanban__upload_file_to_page`. Don't be misled by the
+server name: despite living next to the Kanban tools, it works against **any**
+Notion page the integration can see, not just a Kanban card.
+
+```
+upload_file_to_page(page_id, file_path, caption=None)
+```
+
+Runs Notion's File Upload API in one call — create an upload slot
+(`POST /v1/file_uploads`), send the bytes (`POST /v1/file_uploads/{id}/send`,
+multipart/form-data), then append a `file`/`image`/`pdf` block referencing it
+— because Notion deletes an upload that isn't attached to something within an
+hour, so the three steps can't be split across separate tool calls. `file_path`
+is read off the **aw-workspace filesystem** (write it to `.tmp/` first if it
+came from somewhere else), and the same 20 MB single-part ceiling as
+`attach_kanban_file` applies. Same prerequisite as everything else here: the
+target page must already be shared with the integration, or the call fails
+with `object_not_found`.
+
 ## IDs
 
 Notion page/database/data-source IDs are UUIDs, usually visible in the

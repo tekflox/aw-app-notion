@@ -768,6 +768,62 @@ def test_attach_file_requires_a_page_id():
         raise AssertionError("expected ValueError")
 
 
+# ── upload_file_to_page ──────────────────────────────────────────────────
+# Generic sibling of attach_kanban_file — same underlying board.attach_file,
+# a different tool name/description so an agent working on an arbitrary
+# Notion page (not a Kanban card) finds it.
+
+def test_upload_file_to_page_is_advertised_and_handled():
+    listed = {t["name"] for t in http_handler.TOOLS_SCHEMA}
+    assert "upload_file_to_page" in listed
+    assert "upload_file_to_page" in http_handler.HANDLERS
+
+
+def test_upload_file_to_page_uploads_and_appends_a_block(tmp_path):
+    pdf = tmp_path / "report.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    board, fake = _board()
+
+    resp = _call(board, "upload_file_to_page", {"page_id": "page-9", "file_path": str(pdf)})
+
+    assert resp["result"]["isError"] is False
+    method, path, body = fake.calls[-1]
+    assert (method, path) == ("PATCH", "/blocks/page-9/children")
+    block = body["children"][0]
+    assert block["type"] == "pdf"
+    assert block["pdf"]["file_upload"] == {"id": "upload-1"}
+    assert block["pdf"]["caption"] == []
+
+
+def test_upload_file_to_page_writes_a_caption(tmp_path):
+    png = tmp_path / "shot.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    board, fake = _board()
+
+    board.attach_file("page-1", str(png), caption="source screenshot")
+
+    method, path, body = fake.calls[-1]
+    block = body["children"][0]
+    assert block["image"]["caption"][0]["text"]["content"] == "source screenshot"
+
+
+def test_upload_file_to_page_requires_a_page_id():
+    board, _ = _board()
+    try:
+        http_handler._h_upload_file_to_page(board, {"file_path": "/tmp/x.pdf"})
+    except ValueError as exc:
+        assert "page_id" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_upload_file_to_page_rejects_a_missing_file(tmp_path):
+    board, fake = _board()
+    result = board.attach_file("page-1", str(tmp_path / "nope.pdf"))
+    assert result["ok"] is False
+    assert fake.uploads == []
+
+
 def test_upload_file_posts_a_well_formed_multipart_body(monkeypatch):
     from notion_app.kanban import client as client_mod
 

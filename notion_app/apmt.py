@@ -30,6 +30,7 @@ and keeps the local token rather than reporting a success it did not achieve.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 
@@ -64,19 +65,28 @@ class ApmtNotConfigured(ApmtSyncError):
     """
 
 
-def token_fingerprint(token: str | None) -> str:
-    """sha256 of the token — the only thing about it that crosses the wire on
-    a reconcile cycle.
+def token_fingerprint(token: str | None, config: dict | None = None) -> str:
+    """sha256 of the token, plus the Kanban board config when given — covers
+    drift in either (Kanban
+    ``architecture:decommission-aw-app-notion-into-ap-mt``, comment 7.A): a
+    renamed ``kanban_database_id`` or an edited ``kanban_statuses`` map must
+    re-push exactly like a token rotation does, since AP-MT's sweep needs
+    both to be current, not just the token.
 
     MUST stay byte-identical to agents-platform-multitenant's
-    ``core/secret_crypto.py::fingerprint``; a divergence doesn't fail loudly,
-    it just re-pushes the token every 6 minutes forever. Empty/absent token
-    hashes to the empty string so "no token here" and "no token there" compare
-    equal without either side special-casing it.
+    ``api/runners.py``'s own fingerprint computation; a divergence doesn't
+    fail loudly, it just re-pushes every 6 minutes forever. Empty/absent
+    token with no config hashes to the empty string so "nothing here" and
+    "nothing there" compare equal without either side special-casing it —
+    and an omitted ``config`` behaves exactly like the token-only hash this
+    already was, so a caller that never passes one sees no change.
     """
-    if not token:
+    if not token and not config:
         return ""
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+    payload = token or ""
+    if config:
+        payload += "\x00" + json.dumps(config, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _from_env_file(name: str) -> str | None:
@@ -142,8 +152,15 @@ def _call(method: str, path: str, body: dict | None = None) -> dict:
         raise ApmtSyncError(f"{RUNNERS_APP_ID} returned a non-JSON body") from exc
 
 
-def push_token(token: str) -> dict:
-    return _call("POST", "/notion-token", {"token": token})
+def push_token(token: str, config: dict | None = None) -> dict:
+    """Push the token and, when given, the Kanban board config
+    (``{"kanban_database_id": ..., "kanban_statuses": {...}}`` — see
+    ``KanbanConfig.as_dict``). ``config`` omitted or empty sends exactly the
+    body this call always sent, so an existing caller needs no change."""
+    body = {"token": token}
+    if config:
+        body.update(config)
+    return _call("POST", "/notion-token", body)
 
 
 def delete_token() -> dict:
@@ -155,23 +172,25 @@ def remote_state() -> dict:
     return _call("GET", "/notion-token/state")
 
 
-def reconcile(local_token: str | None) -> dict:
+def reconcile(local_token: str | None, local_config: dict | None = None) -> dict:
     """Make AP-MT's copy match this app's, and report what that took.
 
     Called on the 360s skills-sync reconcile tick (see the runners app's
-    plugin.py) and reachable by hand as ``POST /apmt/sync``. Three outcomes,
-    all of them normal:
+    plugin.py), right after activation (so "ao instalar" is literal, not just
+    eventually-consistent within ~6 minutes), and reachable by hand as
+    ``POST /apmt/sync``. Three outcomes, all of them normal:
 
-    * fingerprints agree            → nothing sent, ``changed: False``
-    * local token, remote differs   → push (a rotation, or a push that failed
-      when it was first attempted)
+    * fingerprints agree             → nothing sent, ``changed: False``
+    * local token, remote differs    → push (a rotation, a board-config edit,
+      or a push that failed when it was first attempted)
     * no local token, remote has one → delete (repairs a logout whose delete
       leg failed after the local secret was already gone)
 
-    Never raises: this runs in a watchdog, where an exception is a stack
-    trace every six minutes that nobody reads.
+    Never raises: this runs in a watchdog (and at activation), where an
+    exception is a stack trace every six minutes — or every restart — that
+    nobody reads.
     """
-    local_fp = token_fingerprint(local_token)
+    local_fp = token_fingerprint(local_token, local_config)
     try:
         state = remote_state()
     except ApmtSyncError as exc:
@@ -183,7 +202,7 @@ def reconcile(local_token: str | None) -> dict:
 
     try:
         if local_token:
-            push_token(local_token)
+            push_token(local_token, local_config)
             action = "pushed"
         else:
             delete_token()

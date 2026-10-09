@@ -78,6 +78,20 @@ def test_fingerprint_is_plain_sha256_and_empty_for_no_token():
     assert apmt_mod.token_fingerprint(None) == ""
 
 
+def test_fingerprint_changes_with_the_board_config():
+    """Same token, different board config -> different fingerprint, so a
+    renamed database_id or an edited status map re-pushes like a rotation."""
+    bare = apmt_mod.token_fingerprint("ntn_abc")
+    with_db = apmt_mod.token_fingerprint("ntn_abc", {"kanban_database_id": "db1"})
+    with_other_db = apmt_mod.token_fingerprint("ntn_abc", {"kanban_database_id": "db2"})
+    assert bare != with_db != with_other_db
+    # Deterministic regardless of key order in the caller's dict.
+    assert apmt_mod.token_fingerprint("ntn_abc", {"a": 1, "b": 2}) == \
+        apmt_mod.token_fingerprint("ntn_abc", {"b": 2, "a": 1})
+    # An empty config is the same as omitting it entirely.
+    assert apmt_mod.token_fingerprint("ntn_abc", {}) == bare
+
+
 # --- push on save -----------------------------------------------------------
 
 
@@ -90,6 +104,25 @@ def test_saving_a_token_pushes_it(client_ctx, block_apmt_network):
     assert r.json()["apmt"]["pushed"] is True
     assert relay.calls == [("POST", "/notion-token", {"token": "ntn_saved"})]
     assert ctx.secrets.read("notion_token") == "ntn_saved"
+
+
+def test_saving_a_token_pushes_the_board_config_too(client_ctx, block_apmt_network):
+    """architecture:decommission-aw-app-notion-into-ap-mt, comment 7.A: AP-MT's
+    central sweep needs the board's database_id/statuses, not just the token —
+    both now cross the wire on every push."""
+    client, ctx = client_ctx
+    ctx.config = {"kanban_database_id": "db123",
+                  "kanban_statuses": {"ready": "Ready"}}
+    relay = _relay(block_apmt_network, Relay())
+
+    r = client.post("/settings", json={"notion_token": "ntn_saved"})
+    assert r.status_code == 200
+    assert len(relay.calls) == 1
+    method, path, body = relay.calls[0]
+    assert (method, path) == ("POST", "/notion-token")
+    assert body["token"] == "ntn_saved"
+    assert body["kanban_database_id"] == "db123"
+    assert body["kanban_statuses"]["ready"] == "Ready"
 
 
 def test_a_failed_push_does_not_fail_the_save(client_ctx, block_apmt_network):
@@ -196,6 +229,23 @@ def test_reconcile_deletes_a_remote_copy_with_no_local_token(client_ctx, block_a
     r = client.post("/apmt/sync")
     assert r.json() == {"reconciled": True, "changed": True, "action": "deleted"}
     assert relay.methods == ["GET", "DELETE"]
+
+
+def test_reconcile_repushes_on_board_config_drift_alone(client_ctx, block_apmt_network):
+    """The token hasn't changed, but the board config has — the sweep still
+    needs the fresh database_id/statuses, so this must count as drift too."""
+    client, ctx = client_ctx
+    ctx.secrets.write("notion_token", "ntn_same")
+    ctx.config = {"kanban_database_id": "db_new"}
+    relay = _relay(block_apmt_network, Relay(
+        remote_fingerprint=apmt_mod.token_fingerprint("ntn_same", {"kanban_database_id": "db_old"})))
+
+    r = client.post("/apmt/sync")
+    assert r.json() == {"reconciled": True, "changed": True, "action": "pushed"}
+    method, path, body = relay.calls[-1]
+    assert (method, path) == ("POST", "/notion-token")
+    assert body["token"] == "ntn_same"
+    assert body["kanban_database_id"] == "db_new"
 
 
 def test_reconcile_reports_an_unreachable_relay_without_raising(client_ctx, block_apmt_network):

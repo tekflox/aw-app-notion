@@ -73,3 +73,13 @@ class KanbanConfig:
     @property
     def configured(self) -> bool:
         return bool(self.database_id)
+
+    def as_dict(self) -> dict:
+        """``{"kanban_database_id": ..., "kanban_statuses": {...}}`` when a
+        board is configured, else ``{}`` — the shape pushed to AP-MT (Kanban
+        ``architecture:decommission-aw-app-notion-into-ap-mt``, comment 7.A)
+        so its central sweep can resolve a tenant's own board without being
+        told the id a second time out of band."""
+        if not self.configured:
+            return {}
+        return {DB_ID_KEY: self.database_id, STATUSES_KEY: self.statuses}

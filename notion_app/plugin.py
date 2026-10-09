@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import os
 
+from . import apmt as apmt_mod
 from . import mcp_config
 from . import routes as routes_mod
 from .kanban.config import KanbanConfig
@@ -47,6 +48,18 @@ class NotionAppPlugin:
             sorted(doc["mcpServers"]) or "none",
             kanban.database_id or "not configured",
         )
+
+        # Push this workspace's token + board config to AP-MT right at boot
+        # (Kanban architecture:decommission-aw-app-notion-into-ap-mt, comment
+        # 7.A.i): the 360s reconcile tick already repairs drift, but only a
+        # call here covers "ao instalar" literally — without it a workspace
+        # that boots with a fresh/rotated token just waits out that same
+        # tick. Fail-open: ``reconcile`` never raises, but activation must
+        # never be blocked by this regardless.
+        try:
+            apmt_mod.reconcile(token, kanban.as_dict())
+        except Exception:  # noqa: BLE001 — activation must never be blocked by this
+            log.warning("apmt: boot reconcile failed", exc_info=True)
 
     async def on_config_changed(self, ctx) -> None:
         """Core calls this after ``ctx.config`` is updated. Nothing to rebuild

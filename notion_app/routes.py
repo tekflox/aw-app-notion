@@ -99,7 +99,7 @@ def build_routes(ctx) -> FastAPI:
         # a failed push without anyone doing anything. Reported in the body
         # so a failure is visible rather than only in a log.
         try:
-            apmt = {"pushed": True, **apmt_mod.push_token(token)}
+            apmt = {"pushed": True, **apmt_mod.push_token(token, kanban_cfg.as_dict())}
         except apmt_mod.ApmtSyncError as exc:
             apmt = {"pushed": False, "reason": str(exc)}
         return {
@@ -181,7 +181,7 @@ def build_routes(ctx) -> FastAPI:
         aw-app-agents-platform-runners' existing skills-sync watchdog, which
         is why there is no scheduler here; also a manual retry after a failed
         push or a half-failed logout."""
-        return apmt_mod.reconcile(ctx.secrets.read(TOKEN_KEY))
+        return apmt_mod.reconcile(ctx.secrets.read(TOKEN_KEY), kanban_cfg.as_dict())
 
     @app.get("/mcp.json")
     async def mcp_json() -> dict:

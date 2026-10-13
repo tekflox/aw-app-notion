@@ -340,12 +340,6 @@ def _card_comments_md(client: NotionClient, page_id: str) -> str:
     return "\n".join(out)
 
 
-def _card_status(card: dict) -> str:
-    """The card's Notion status option name, straight off the query result."""
-    prop = card.get("properties", {}).get("Status", {})
-    return ((prop.get("select") or prop.get("status") or {}) or {}).get("name", "")
-
-
 def _card_slugs(cards: list[dict]) -> dict[str, str]:
     """page_id → the slug to use, with collisions disambiguated board-wide.
 

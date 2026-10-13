@@ -274,6 +274,67 @@ def _is_legacy_kanban_path(rel_path: str) -> bool:
     return bool(rel_path) and os.path.dirname(rel_path) != KANBAN_SUBDIR
 
 
+def _file_notion_id(path: str) -> str | None:
+    """The ``notion_id`` a mirror file claims in its frontmatter, or None if
+    it has none / cannot be read. Bounded read — the key sits in the first
+    handful of frontmatter lines, and a card body can be long."""
+    try:
+        with open(path) as f:
+            for _ in range(20):
+                line = f.readline()
+                if not line:
+                    break
+                if line.startswith("notion_id:"):
+                    return line.split(":", 1)[1].strip() or None
+    except OSError:
+        return None
+    return None
+
+
+def _legacy_copies(root: str, prev_path: str, page_id: str) -> list[str]:
+    """Every pre-§19 file on disk that belongs to ``page_id``, found by the
+    name it was last written under — ``prev_path``'s basename — never by the
+    flat name it is about to get.
+
+    The two names differ exactly when flattening itself creates the
+    collision. Status used to separate two same-titled cards, so each held
+    the same *unsuffixed* basename in its own status dir; board-wide dedup
+    (`_card_slugs`) then gives both a ``-<id8>`` suffix, so a sweep keyed to
+    the new name matches nothing and the old file is orphaned for good —
+    once state says this page_id is migrated, no code path revisits it.
+
+    The rule is not "two unsuffixed twins": it is any legacy card whose
+    tracked basename differs from its new board-wide slug. Replaying the
+    real mirror (1,611 cards, 2026-10-13) orphaned THREE files across two
+    collision groups — the "resilience: aw-postgres sem restart policy no
+    compose" pair in Archived + Self-closed Archived, and one of three
+    "Movements" cards, the only member of its group that was alone in its
+    status dir and so carried no pre-§19 suffix. A group whose members were
+    already suffixed per status dir (six "aw-meta-display: aprovar deploy
+    TestFlight" cards, all in done_archived) keeps the same name either way
+    and was never at risk.
+
+    Ownership is checked against each candidate's own ``notion_id``, because
+    the same basename in another status dir is either a leftover of THIS
+    card (the 11 live untracked orphans — the known stale-dual-folder bug)
+    or another card's live file (the twin above). Deleting a twin's file
+    would drop that card from the mirror until its own turn came — a later
+    run, or never if the flag is turned off in between. A file we cannot
+    attribute is treated as ours: §19.7 requires that no status dir survive
+    convergence, and all 1,622 live legacy files do carry the key.
+    """
+    if not prev_path:
+        return []
+    candidates = [os.path.join(root, prev_path)]
+    candidates += glob.glob(os.path.join(root, KANBAN_SUBDIR, "*",
+                                         glob.escape(os.path.basename(prev_path))))
+    out: list[str] = []
+    for path in dict.fromkeys(candidates):      # dedupe, prev_path first
+        if os.path.isfile(path) and _file_notion_id(path) in (page_id, None):
+            out.append(path)
+    return out
+
+
 def _prune_empty_dirs(root: str) -> None:
     """Drop status dirs left empty after cards moved out of them. A stale
     ``kanban/ready/`` with nothing in it reads as "nothing is ready", which is
@@ -475,8 +536,9 @@ def sync_kanban(client: NotionClient, board, *, force: bool = False,
     never presented to fs-sync's mass-delete valve in one scan. Off by
     default — a run with the flag off (or no legacy cards left) behaves
     exactly like steady-state operation on the flat layout. Flattening a
-    legacy card also sweeps every status dir for its slug, which absorbs
-    the known stale-dual-folder leftovers (a card whose old status file was
+    legacy card sweeps the files it actually left on disk — keyed to its
+    tracked pre-migration name, see ``_legacy_copies`` — which absorbs the
+    known stale-dual-folder leftovers (a card whose old status file was
     never cleaned up) in the same pass.
     """
     db_id = board.config.database_id
@@ -537,12 +599,25 @@ def sync_kanban(client: NotionClient, board, *, force: bool = False,
             lines.append(f"warn: failed to render card {page_id} — {exc}")
             continue
 
+        out = os.path.join(root, rel_path)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        existed = os.path.exists(out)
+        with open(out, "w") as f:
+            f.write(content)
+
+        # The new file is written BEFORE the old copies go, not after: a kill
+        # in between then leaves the card readable at both paths — which the
+        # next run converges, since state still calls it legacy — instead of
+        # absent from both. Removal never touches `out` (the flat path), so
+        # the counters above are unaffected by the ordering.
         if legacy:
-            # Sweep every status dir for this slug, not just the tracked
-            # path — this is what absorbs the 12 known stale-dual-folder
-            # leftovers (a card whose OLD status file was never removed) in
-            # the same run that flattens the card, rather than a second pass.
-            for stale in glob.glob(os.path.join(root, KANBAN_SUBDIR, "*", f"{slug}.md")):
+            # Sweep by the card's PRE-migration identity, not by the flat
+            # name it just got: `_legacy_copies` keys on the tracked path's
+            # own basename, which is what makes a collision introduced by
+            # flattening still match its old unsuffixed file. Picking up its
+            # same-named siblings in other status dirs is what absorbs the
+            # known stale-dual-folder leftovers in the same run.
+            for stale in _legacy_copies(root, prev_path, page_id):
                 os.remove(stale)
                 lines.append(f"removed stale: {os.path.relpath(stale, root)}")
                 removed += 1
@@ -557,11 +632,6 @@ def sync_kanban(client: NotionClient, board, *, force: bool = False,
             lines.append(f"moved: {prev_path} → {rel_path}")
             moved += 1
 
-        out = os.path.join(root, rel_path)
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        existed = os.path.exists(out)
-        with open(out, "w") as f:
-            f.write(content)
         if existed and not legacy and not (prev_path and prev_path != rel_path):
             updated += 1
             lines.append(f"updated: {rel_path}")

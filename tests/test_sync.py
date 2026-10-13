@@ -327,12 +327,24 @@ def _tree(tmp_path):
     return sorted(f.name for f in root.iterdir() if f.is_file())
 
 
-def _legacy_card(tmp_path, slug, status_key, content="legacy content\n"):
+def _legacy_card(tmp_path, slug, status_key, content="legacy content\n", notion_id=None):
     """Write a file at the pre-§19 status-dir path and return that rel path
-    — used to seed a card already tracked under the old layout."""
+    — used to seed a card already tracked under the old layout.
+
+    Pass ``notion_id`` to seed the real on-disk shape, whose frontmatter
+    names the card the file belongs to (all 1,622 live legacy files do).
+    That key is what tells a leftover of THIS card apart from another
+    card's live file sitting at the same basename in another status dir.
+    """
     rel = f"notion/kanban/{status_key}/{slug}.md"
     path = tmp_path / "knowledge_base" / rel
     path.parent.mkdir(parents=True, exist_ok=True)
+    if notion_id:
+        content = "".join([
+            "---\n", "source: notion\n", "repo: kanban\n", f"path: {rel}\n",
+            f"notion_id: {notion_id}\n", f"status_key: {status_key}\n", "---\n",
+            "\n", content,
+        ])
     path.write_text(content)
     return rel
 
@@ -590,6 +602,109 @@ def test_stale_dual_folder_leftovers_are_removed_on_migration(tmp_path, monkeypa
     assert not (tmp_path / "knowledge_base" / current_rel).exists()
     assert not (tmp_path / "knowledge_base" / stale_rel).exists()
     assert _tree(tmp_path) == ["primeiro.md"]
+
+
+#   The live pair this fixture is built from (read-only scan of the state
+#   file + the mirror, 2026-10-13): two non-trashed cards sharing a title,
+#   one in Archived and one in Self-closed Archived, each at the same
+#   unsuffixed basename in its own status dir.
+TWIN_A = "38f5bf3b-9510-81ab-9337-d8bc76603a13"      # Archived
+TWIN_B = "38d5bf3b-9510-81b0-a075-d66c20cee494"      # Self-closed Archived
+TWIN_TITLE = "resilience: aw-postgres sem restart policy no compose"
+TWIN_SLUG = "resilience-aw-postgres-sem-restart-policy-no-compose"
+
+
+def _seed_live_twins(tmp_path, monkeypatch):
+    client, board = _kanban_setup(tmp_path, monkeypatch, [
+        _card(TWIN_A, TWIN_TITLE, "Archived"),
+        _card(TWIN_B, TWIN_TITLE, "Self-closed Archived"),
+    ])
+    rel_a = _legacy_card(tmp_path, TWIN_SLUG, "archived", notion_id=TWIN_A)
+    rel_b = _legacy_card(tmp_path, TWIN_SLUG, "self_closed_archived", notion_id=TWIN_B)
+    _seed_legacy_state(tmp_path, {
+        TWIN_A: {"path": rel_a, "status_key": "archived",
+                 "last_edited": "2026-08-13T00:00:00.000Z"},
+        TWIN_B: {"path": rel_b, "status_key": "self_closed_archived",
+                 "last_edited": "2026-08-13T00:00:00.000Z"},
+    })
+    return client, board, rel_a, rel_b
+
+
+def test_a_collision_created_by_flattening_still_sweeps_the_old_unsuffixed_file(
+        tmp_path, monkeypatch):
+    """Two DIFFERENT cards sharing a title in two different status columns —
+    safe pre-§19, because the status dir was silently doing the uniqueness
+    work, so each sat at the SAME unsuffixed basename.
+
+    Flattening removes that separator: `_card_slugs` now claims slugs
+    board-wide, both cards collide and both gain a `-<id8>` suffix. A sweep
+    keyed to that NEW name globs for a file that never existed, so the old
+    per-status file is left behind — and permanently, since nothing revisits
+    a page_id once state records it as migrated. That breaks two of §19.7's
+    gates at once: no status subdirectory may survive convergence, and the
+    graph must show zero live status-dir documents.
+    """
+    client, board, rel_a, rel_b = _seed_live_twins(tmp_path, monkeypatch)
+
+    result = sync_mod.sync_kanban(client, board, flatten_migration=True)
+    assert result["migrated"] == 2
+    # The two old unsuffixed files — what the new-slug-keyed glob never matched.
+    assert not (tmp_path / "knowledge_base" / rel_a).exists()
+    assert not (tmp_path / "knowledge_base" / rel_b).exists()
+    assert _tree(tmp_path) == [f"{TWIN_SLUG}-20cee494.md", f"{TWIN_SLUG}-76603a13.md"]
+    # Each flat file is its own card's, not a copy of the other's.
+    root = _kanban_dir(tmp_path)
+    assert f"notion_id: {TWIN_A}" in (root / f"{TWIN_SLUG}-76603a13.md").read_text()
+    assert f"notion_id: {TWIN_B}" in (root / f"{TWIN_SLUG}-20cee494.md").read_text()
+    assert all(not (root / name).is_dir() for name in os.listdir(root))     # §19.7
+
+
+def test_a_twin_still_awaiting_its_turn_keeps_its_file(tmp_path, monkeypatch):
+    """The other half of keying the sweep by name: the twin's live file
+    shares that same pre-flatten basename, so a name-only sweep would take
+    it out while it is still tracked on that path — leaving that card absent
+    from the mirror until a later run, or for good if the flag is turned off
+    in between. Ownership comes from the file's own ``notion_id``.
+    """
+    client, board, rel_a, rel_b = _seed_live_twins(tmp_path, monkeypatch)
+
+    first = sync_mod.sync_kanban(client, board, flatten_migration=True,
+                                 flatten_batch_limit=1)
+    assert first["migrated"] == 1
+    assert not (tmp_path / "knowledge_base" / rel_a).exists()    # migrated
+    assert (tmp_path / "knowledge_base" / rel_b).exists()        # not its turn yet
+    state = json.loads(Path(sync_mod.state_path()).read_text())
+    assert state["kanban"][TWIN_B]["path"] == rel_b              # still tracked there
+
+    second = sync_mod.sync_kanban(client, board, flatten_migration=True,
+                                  flatten_batch_limit=1)
+    assert second["migrated"] == 1
+    assert not (tmp_path / "knowledge_base" / rel_b).exists()
+    assert _tree(tmp_path) == [f"{TWIN_SLUG}-20cee494.md", f"{TWIN_SLUG}-76603a13.md"]
+
+
+def test_the_flat_file_is_written_before_the_old_one_is_removed(tmp_path, monkeypatch):
+    """Narrows the crash window: with the removal first, a kill in between
+    left the card absent from BOTH paths. It self-heals on the next run, so
+    this is an ordering swap rather than a restructure — the worst a kill
+    now leaves is the card readable at both paths, which the next run
+    converges because state still calls it legacy."""
+    client, board = _kanban_setup(tmp_path, monkeypatch, [_card("c1", "Primeiro", "Backlog")])
+    rel = _legacy_card(tmp_path, "primeiro", "backlog", notion_id="c1")
+    _seed_legacy_state(tmp_path, {"c1": {"path": rel, "status_key": "backlog",
+                                         "last_edited": "2026-08-13T00:00:00.000Z"}})
+    seen = {}
+    real_remove = os.remove
+
+    def _spy(path):
+        seen.setdefault("flat_present_at_removal",
+                        (_kanban_dir(tmp_path) / "primeiro.md").exists())
+        real_remove(path)
+
+    monkeypatch.setattr("os.remove", _spy)
+    result = sync_mod.sync_kanban(client, board, flatten_migration=True)
+    assert result["migrated"] == 1
+    assert seen["flat_present_at_removal"] is True
 
 
 def test_convergence_leaves_no_status_subdirectory_on_disk(tmp_path, monkeypatch):

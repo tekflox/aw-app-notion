@@ -33,6 +33,7 @@ Three things had to change in the move:
 """
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import logging
@@ -50,6 +51,16 @@ log = logging.getLogger("aw_apps.notion.sync")
 ROOT_PAGE_KEY = "sync_root_page_id"
 BIDIRECTIONAL_KEY = "sync_bidirectional"
 COMMENTS_KEY = "sync_kanban_comments"
+
+# §19: the pre-flatten Kanban mirror (notion/kanban/<status>/<slug>.md) is
+# migrated to notion/kanban/<slug>.md in staged, throttled batches rather
+# than one shot — a bulk flatten would present fs-sync's mass-delete valve
+# with ~1,619 missing paths in one scan against a guard-2 threshold of
+# ~200, which trips it by design. Off by default: only an operator turning
+# this on (POST /api/apps/notion/config {"kanban_flatten_migration": true})
+# or an explicit per-call override runs the migration at all.
+FLATTEN_MIGRATION_KEY = "kanban_flatten_migration"
+FLATTEN_BATCH_LIMIT = 100
 
 # Everything this app mirrors lives under one ``notion/`` root inside the KB
 # tree, so a KB search result's path says where it came from and a stale
@@ -256,6 +267,13 @@ def _save_state(state: dict) -> None:
     os.replace(tmp, path)
 
 
+def _is_legacy_kanban_path(rel_path: str) -> bool:
+    """True for the pre-§19 layout (``KANBAN_SUBDIR/<status>/<slug>.md``) —
+    anything with a status directory between ``KANBAN_SUBDIR`` and the file.
+    The flat layout (``KANBAN_SUBDIR/<slug>.md``) has none."""
+    return bool(rel_path) and os.path.dirname(rel_path) != KANBAN_SUBDIR
+
+
 def _prune_empty_dirs(root: str) -> None:
     """Drop status dirs left empty after cards moved out of them. A stale
     ``kanban/ready/`` with nothing in it reads as "nothing is ready", which is
@@ -328,29 +346,32 @@ def _card_status(card: dict) -> str:
     return ((prop.get("select") or prop.get("status") or {}) or {}).get("name", "")
 
 
-def _card_slugs(cards: list[dict], statuses: dict[str, str]) -> dict[str, str]:
-    """page_id → the slug to use, with collisions disambiguated.
+def _card_slugs(cards: list[dict]) -> dict[str, str]:
+    """page_id → the slug to use, with collisions disambiguated board-wide.
 
     Card titles are not unique on a real board — "Untitled" alone accounted
     for several, and a slug collision silently means one card overwrites
-    another's file and the mirror is quietly short. When a slug is claimed by
-    more than one card in the same status dir, ALL of them get an id suffix,
-    not just the losers: that keeps a card's filename from depending on which
-    order the board came back in.
+    another's file and the mirror is quietly short. Status no longer lives
+    in the path (§19), so a slug is now claimed board-wide, not per status
+    dir: two cards sharing a title used to sit safely in different status
+    directories and now collide, and the 12 known stale cross-status
+    basename duplicates are exactly this shape. When a slug is claimed by
+    more than one card, ALL of them get an id suffix, not just the losers:
+    that keeps a card's filename from depending on which order the board
+    came back in.
     """
     from .kanban.client import page_title
 
     keys: dict[str, list[str]] = {}
-    base: dict[str, tuple[str, str]] = {}
+    base: dict[str, str] = {}
     for card in cards:
-        status_key = _status_dirname(_card_status(card), statuses)
         slug = _slugify(page_title(card) or "Untitled")
-        base[card["id"]] = (status_key, slug)
-        keys.setdefault(f"{status_key}/{slug}", []).append(card["id"])
+        base[card["id"]] = slug
+        keys.setdefault(slug, []).append(card["id"])
 
     out: dict[str, str] = {}
-    for page_id, (status_key, slug) in base.items():
-        colliding = keys[f"{status_key}/{slug}"]
+    for page_id, slug in base.items():
+        colliding = keys[slug]
         out[page_id] = f"{slug}-{_id_suffix(page_id)}" if len(colliding) > 1 else slug
     return out
 
@@ -369,7 +390,13 @@ def _id_suffix(page_id: str) -> str:
 
 def _render_card(client: NotionClient, card: dict, statuses: dict[str, str],
                  *, with_comments: bool, slug: str | None = None) -> tuple[str, str, str]:
-    """Render one card. Returns (rel_path, status_key, content)."""
+    """Render one card. Returns (rel_path, status_key, content).
+
+    ``rel_path`` is flat (``KANBAN_SUBDIR/<slug>.md``, §19) — status lives
+    only in frontmatter (``status``/``status_key`` below) and in the
+    rendered "Propriedades" section, never in the path, so a column move is
+    a content update at a stable path, never a rename.
+    """
     from .kanban.client import extract_property_value, page_title
 
     page_id = card["id"]
@@ -379,7 +406,7 @@ def _render_card(client: NotionClient, card: dict, statuses: dict[str, str],
     notion_status = plain.get("Status") or ""
     status_key = _status_dirname(notion_status, statuses)
     slug = slug or _slugify(title)
-    rel_path = f"{KANBAN_SUBDIR}/{status_key}/{slug}.md"
+    rel_path = f"{KANBAN_SUBDIR}/{slug}.md"
 
     body = _blocks_to_md(client, _get_block_children(client, page_id))
     comments = _card_comments_md(client, page_id) if with_comments else ""
@@ -433,8 +460,9 @@ def _query_all_cards(client: NotionClient, database_id: str) -> list[dict]:
 
 
 def sync_kanban(client: NotionClient, board, *, force: bool = False,
-                with_comments: bool = True) -> dict:
-    """Mirror every Kanban card into ``notion/kanban/<status>/<slug>.md``.
+                with_comments: bool = True, flatten_migration: bool = False,
+                flatten_batch_limit: int = FLATTEN_BATCH_LIMIT) -> dict:
+    """Mirror every Kanban card into ``notion/kanban/<slug>.md`` (§19).
 
     **This tree is derived, not a source.** Deleting a file here does nothing
     to Notion — unlike ``notion/notes/``, where ``bidirectional`` makes a
@@ -442,8 +470,20 @@ def sync_kanban(client: NotionClient, board, *, force: bool = False,
     every run, so a hand-deleted file simply comes back. That asymmetry is
     deliberate: a Kanban card's lifecycle belongs to the board.
 
-    Cards that changed status have their previous file removed, so a card is
-    never in two status dirs at once.
+    The path has no status component, so a column move is a content update
+    at the SAME path — never a rename, never a removed+added pair, so
+    fs-sync downstream never reads routine card movement as a delete.
+
+    ``flatten_migration`` gates the one-time, throttled migration of cards
+    still tracked under the pre-§19 ``<status>/<slug>.md`` layout: at most
+    ``flatten_batch_limit`` of them are flattened per run (old file removed,
+    new flat file written, in the same run), so a 1,649-card backlog is
+    never presented to fs-sync's mass-delete valve in one scan. Off by
+    default — a run with the flag off (or no legacy cards left) behaves
+    exactly like steady-state operation on the flat layout. Flattening a
+    legacy card also sweeps every status dir for its slug, which absorbs
+    the known stale-dual-folder leftovers (a card whose old status file was
+    never cleaned up) in the same pass.
     """
     db_id = board.config.database_id
     if not db_id:
@@ -457,8 +497,8 @@ def sync_kanban(client: NotionClient, board, *, force: bool = False,
 
     cards = _query_all_cards(client, db_id)
     active_ids = {c["id"] for c in cards}
-    slugs = _card_slugs(cards, statuses)
-    added = updated = skipped = moved = removed = 0
+    slugs = _card_slugs(cards)
+    added = updated = skipped = moved = removed = migrated = 0
 
     # A card that left the board (archived/deleted) must not linger in the
     # mirror claiming a status it no longer has.
@@ -475,31 +515,52 @@ def sync_kanban(client: NotionClient, board, *, force: bool = False,
     for card in cards:
         page_id = card["id"]
         prev = tracked.get(page_id, {})
+        prev_path = prev.get("path")
         last_edited = card.get("last_edited_time", "")
+        slug = slugs[page_id]
+        rel_path = f"{KANBAN_SUBDIR}/{slug}.md"
 
+        legacy = bool(prev_path) and _is_legacy_kanban_path(prev_path)
+        if legacy:
+            # A pre-§19 card. Flattening it is migration work, staged behind
+            # its own flag and a per-run budget so the backlog never lands
+            # on fs-sync's valve as one bulk delete. Not this run's turn:
+            # leave it exactly as it is, on its old path, untouched.
+            if not flatten_migration or migrated >= flatten_batch_limit:
+                skipped += 1
+                continue
         # Skip on an unchanged timestamp WITHOUT fetching the body/comments —
         # that's the whole point of reading last_edited_time off the query.
-        expected = f"{KANBAN_SUBDIR}/{_status_dirname(_card_status(card), statuses)}/{slugs[page_id]}.md"
-        if (not force and prev.get("last_edited") == last_edited
-                and prev.get("path") == expected
-                and os.path.exists(os.path.join(root, expected))):
+        elif (not force and prev.get("last_edited") == last_edited
+                and prev_path == rel_path and os.path.exists(os.path.join(root, rel_path))):
             skipped += 1
             continue
 
         try:
             rel_path, status_key, content = _render_card(
-                client, card, statuses, with_comments=with_comments,
-                slug=slugs.get(page_id))
+                client, card, statuses, with_comments=with_comments, slug=slug)
         except NotionError as exc:
             lines.append(f"warn: failed to render card {page_id} — {exc}")
             continue
 
-        old_path = prev.get("path")
-        if old_path and old_path != rel_path:
-            old_abs = os.path.join(root, old_path)
+        if legacy:
+            # Sweep every status dir for this slug, not just the tracked
+            # path — this is what absorbs the 12 known stale-dual-folder
+            # leftovers (a card whose OLD status file was never removed) in
+            # the same run that flattens the card, rather than a second pass.
+            for stale in glob.glob(os.path.join(root, KANBAN_SUBDIR, "*", f"{slug}.md")):
+                os.remove(stale)
+                lines.append(f"removed stale: {os.path.relpath(stale, root)}")
+                removed += 1
+            lines.append(f"migrated: {prev_path} → {rel_path}")
+            migrated += 1
+        elif prev_path and prev_path != rel_path:
+            # Residual churn (§19.6-4): only a title edit still moves a
+            # file, since the slug — and so the path — changes with it.
+            old_abs = os.path.join(root, prev_path)
             if os.path.exists(old_abs):
                 os.remove(old_abs)
-            lines.append(f"moved: {old_path} → {rel_path}")
+            lines.append(f"moved: {prev_path} → {rel_path}")
             moved += 1
 
         out = os.path.join(root, rel_path)
@@ -507,7 +568,7 @@ def sync_kanban(client: NotionClient, board, *, force: bool = False,
         existed = os.path.exists(out)
         with open(out, "w") as f:
             f.write(content)
-        if existed and not (old_path and old_path != rel_path):
+        if existed and not legacy and not (prev_path and prev_path != rel_path):
             updated += 1
             lines.append(f"updated: {rel_path}")
         elif not existed:
@@ -517,6 +578,17 @@ def sync_kanban(client: NotionClient, board, *, force: bool = False,
         tracked[page_id] = {"path": rel_path, "status_key": status_key,
                             "last_edited": last_edited}
 
+        if legacy:
+            # Flush immediately rather than waiting for the single
+            # end-of-run save below: a crash between here and that save
+            # must not leave the state file believing this card is still on
+            # its old (already-removed) path. Idempotent either way — see
+            # the "renders the same path twice" branch above — but flushing
+            # per card keeps a half-moved batch's progress exact instead of
+            # merely harmless to retry.
+            state["kanban"] = tracked
+            _save_state({**state, "last_sync": datetime.now(timezone.utc).isoformat()})
+
     _prune_empty_dirs(os.path.join(root, KANBAN_SUBDIR))
     state["kanban"] = tracked
     _save_state({**state, "last_sync": datetime.now(timezone.utc).isoformat()})
@@ -525,7 +597,8 @@ def sync_kanban(client: NotionClient, board, *, force: bool = False,
     for info in tracked.values():
         by_status[info.get("status_key", "?")] = by_status.get(info.get("status_key", "?"), 0) + 1
     return {"ok": True, "added": added, "updated": updated, "skipped": skipped,
-            "moved": moved, "removed": removed, "cards": len(tracked),
+            "moved": moved, "removed": removed, "migrated": migrated,
+            "cards": len(tracked),
             "by_status": dict(sorted(by_status.items())), "log": lines,
             "kanban_dir": os.path.join(root, KANBAN_SUBDIR)}
 
@@ -651,7 +724,9 @@ def sync_notes(client: NotionClient, root_page_id: str, *, force: bool = False,
 
 def run_sync(client: NotionClient, root_page_id: str, board=None, *,
              force: bool = False, bidirectional: bool = False, rebuild: bool = True,
-             notes: bool = True, kanban: bool = True, with_comments: bool = True) -> dict:
+             notes: bool = True, kanban: bool = True, with_comments: bool = True,
+             flatten_migration: bool = False,
+             flatten_batch_limit: int = FLATTEN_BATCH_LIMIT) -> dict:
     """Run both mirrors and reindex once at the end.
 
     One rebuild for both halves, not one each: reindexing is the expensive
@@ -679,10 +754,12 @@ def run_sync(client: NotionClient, root_page_id: str, board=None, *,
         if board is None or not board.config.database_id:
             log.append("skipped kanban: kanban_database_id is not configured")
         else:
-            k = sync_kanban(client, board, force=force, with_comments=with_comments)
+            k = sync_kanban(client, board, force=force, with_comments=with_comments,
+                            flatten_migration=flatten_migration,
+                            flatten_batch_limit=flatten_batch_limit)
             result["kanban"] = k
             log += [f"kanban/ {line}" for line in k["log"]]
-            changed += k["added"] + k["updated"] + k["moved"] + k["removed"]
+            changed += k["added"] + k["updated"] + k["moved"] + k["removed"] + k["migrated"]
 
     if rebuild and changed:
         result["kb_rebuild"] = _rebuild_kb()
@@ -697,12 +774,16 @@ def sync_state() -> dict:
     state = _load_state()
     kanban = state.get("kanban", {})
     by_status: dict[str, int] = {}
+    legacy_remaining = 0
     for info in kanban.values():
         key = info.get("status_key", "?")
         by_status[key] = by_status.get(key, 0) + 1
+        if _is_legacy_kanban_path(info.get("path") or ""):
+            legacy_remaining += 1
     return {"last_sync": state.get("last_sync"),
             "tracked_pages": len(state.get("pages", {})),
             "tracked_cards": len(kanban),
             "cards_by_status": dict(sorted(by_status.items())),
+            "kanban_legacy_remaining": legacy_remaining,
             "notes_dir": notes_dir(), "kanban_dir": kanban_dir(),
             "state_file": state_path()}

@@ -254,6 +254,7 @@ def build_routes(ctx) -> FastAPI:
             "root_page_id": cfg.get(sync_mod.ROOT_PAGE_KEY) or "",
             "bidirectional": bool(cfg.get(sync_mod.BIDIRECTIONAL_KEY, False)),
             "kanban_comments": bool(cfg.get(sync_mod.COMMENTS_KEY, True)),
+            "kanban_flatten_migration": bool(cfg.get(sync_mod.FLATTEN_MIGRATION_KEY, False)),
             # Each half reports separately: a workspace can legitimately
             # mirror only the board, or only the notes.
             "notes_configured": has_token and bool(cfg.get(sync_mod.ROOT_PAGE_KEY)),
@@ -281,6 +282,7 @@ def build_routes(ctx) -> FastAPI:
         """
         cfg = getattr(ctx, "config", None) or {}
         override = data.get("bidirectional")
+        flatten_override = data.get("flatten_migration")
         started = job.start(
             lambda: sync_mod.run_sync(
                 client, cfg.get(sync_mod.ROOT_PAGE_KEY) or "", board,
@@ -291,6 +293,11 @@ def build_routes(ctx) -> FastAPI:
                 notes=data.get("notes", True) is not False,
                 kanban=data.get("kanban", True) is not False,
                 with_comments=bool(cfg.get(sync_mod.COMMENTS_KEY, True)),
+                # §19 migration: off unless explicitly turned on via saved
+                # config or this call's own override — never fires on a
+                # routine sync by accident.
+                flatten_migration=(bool(cfg.get(sync_mod.FLATTEN_MIGRATION_KEY, False))
+                                   if flatten_override is None else bool(flatten_override)),
             ))
         if not started:
             return JSONResponse({"ok": False, "error": "a sync is already running",

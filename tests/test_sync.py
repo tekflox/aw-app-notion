@@ -10,6 +10,7 @@ Run: .venv/aw/bin/python -m pytest tests/test_sync.py
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -313,15 +314,43 @@ def _kanban_setup(tmp_path, monkeypatch, cards):
     return FakeBoardClient(cards, children), FakeBoard(STATUSES)
 
 
+def _kanban_dir(tmp_path):
+    return tmp_path / "knowledge_base" / "notion" / "kanban"
+
+
 def _tree(tmp_path):
-    root = tmp_path / "knowledge_base" / "notion" / "kanban"
+    """The flat kanban mirror (§19): just the filenames directly under
+    notion/kanban/ — there is no status subdirectory to key on anymore."""
+    root = _kanban_dir(tmp_path)
     if not root.is_dir():
-        return {}
-    return {d.name: sorted(f.name for f in d.iterdir())
-            for d in sorted(root.iterdir()) if d.is_dir()}
+        return []
+    return sorted(f.name for f in root.iterdir() if f.is_file())
 
 
-def test_cards_are_filed_under_their_status_dir(tmp_path, monkeypatch):
+def _legacy_card(tmp_path, slug, status_key, content="legacy content\n"):
+    """Write a file at the pre-§19 status-dir path and return that rel path
+    — used to seed a card already tracked under the old layout."""
+    rel = f"notion/kanban/{status_key}/{slug}.md"
+    path = tmp_path / "knowledge_base" / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    return rel
+
+
+def _seed_legacy_state(tmp_path, entries: dict):
+    """entries: page_id -> {"path", "status_key", "last_edited"}. Writes the
+    kanban section of the state file directly, as if a pre-§19 run had
+    produced it."""
+    state_file = Path(sync_mod.state_path())
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    existing = {}
+    if state_file.exists():
+        existing = json.loads(state_file.read_text())
+    existing["kanban"] = entries
+    state_file.write_text(json.dumps(existing))
+
+
+def test_cards_land_flat_no_status_directory(tmp_path, monkeypatch):
     client, board = _kanban_setup(tmp_path, monkeypatch, [
         _card("c1", "Primeiro", "Backlog"),
         _card("c2", "Segundo", "Done"),
@@ -329,44 +358,20 @@ def test_cards_are_filed_under_their_status_dir(tmp_path, monkeypatch):
     ])
     result = sync_mod.sync_kanban(client, board)
     assert result["added"] == 3
-    assert _tree(tmp_path) == {
-        "backlog": ["primeiro.md"],
-        "done": ["segundo.md"],
-        "need_human": ["terceiro.md"],
-    }
+    assert _tree(tmp_path) == ["primeiro.md", "segundo.md", "terceiro.md"]
     assert result["by_status"] == {"backlog": 1, "done": 1, "need_human": 1}
+    assert all(not (_kanban_dir(tmp_path) / name).is_dir()
+              for name in os.listdir(_kanban_dir(tmp_path)))
 
 
-def test_dirs_use_the_logical_key_not_the_notion_label(tmp_path, monkeypatch):
-    """'Auto-resolvido' → 'Self-closed' already happened once. Keying the
-    tree on the Notion label would have moved every card on a rename."""
-    client, board = _kanban_setup(tmp_path, monkeypatch,
-                                  [_card("c1", "Fechado", "Self-closed")])
-    sync_mod.sync_kanban(client, board)
-    assert list(_tree(tmp_path)) == ["auto_resolved"]
-
-
-def test_a_status_with_no_logical_key_still_gets_a_dir(tmp_path, monkeypatch):
-    client, board = _kanban_setup(tmp_path, monkeypatch,
-                                  [_card("c1", "Estranho", "Em Revisão")])
-    sync_mod.sync_kanban(client, board)
-    assert list(_tree(tmp_path)) == ["em-revisão"]
-
-
-def test_a_card_with_no_status_is_not_dropped(tmp_path, monkeypatch):
-    client, board = _kanban_setup(tmp_path, monkeypatch, [_card("c1", "Sem", None)])
-    sync_mod.sync_kanban(client, board)
-    assert list(_tree(tmp_path)) == ["no-status"]
-
-
-def test_card_markdown_carries_frontmatter_body_and_comments(tmp_path, monkeypatch):
+def test_card_markdown_carries_status_in_frontmatter_not_the_path(tmp_path, monkeypatch):
     client, board = _kanban_setup(tmp_path, monkeypatch,
                                   [_card("c1", "Primeiro", "Done", Source="system-analyst")])
     client.comments = {"c1": [{"created_time": "2026-08-01T00:00:00.000Z",
                                "rich_text": [{"plain_text": "entregue"}]}]}
     sync_mod.sync_kanban(client, board)
-    text = (tmp_path / "knowledge_base" / "notion" / "kanban" / "done" / "primeiro.md").read_text()
-    assert "path: notion/kanban/done/primeiro.md" in text
+    text = (_kanban_dir(tmp_path) / "primeiro.md").read_text()
+    assert "path: notion/kanban/primeiro.md" in text
     assert "status: Done" in text and "status_key: done" in text
     assert "notion_id: c1" in text
     assert "- **Source**: system-analyst" in text
@@ -374,11 +379,26 @@ def test_card_markdown_carries_frontmatter_body_and_comments(tmp_path, monkeypat
     assert "## Comentários" in text and "entregue" in text
 
 
+def test_a_status_with_no_logical_key_still_resolves(tmp_path, monkeypatch):
+    client, board = _kanban_setup(tmp_path, monkeypatch,
+                                  [_card("c1", "Estranho", "Em Revisão")])
+    sync_mod.sync_kanban(client, board)
+    text = (_kanban_dir(tmp_path) / "estranho.md").read_text()
+    assert "status_key: em-revisão" in text
+
+
+def test_a_card_with_no_status_is_not_dropped(tmp_path, monkeypatch):
+    client, board = _kanban_setup(tmp_path, monkeypatch, [_card("c1", "Sem", None)])
+    sync_mod.sync_kanban(client, board)
+    text = (_kanban_dir(tmp_path) / "sem.md").read_text()
+    assert "status_key: no-status" in text
+
+
 def test_comments_can_be_turned_off(tmp_path, monkeypatch):
     client, board = _kanban_setup(tmp_path, monkeypatch, [_card("c1", "Primeiro", "Done")])
     client.comments = {"c1": [{"created_time": "x", "rich_text": [{"plain_text": "oi"}]}]}
     sync_mod.sync_kanban(client, board, with_comments=False)
-    text = (tmp_path / "knowledge_base" / "notion" / "kanban" / "done" / "primeiro.md").read_text()
+    text = (_kanban_dir(tmp_path) / "primeiro.md").read_text()
     assert "## Comentários" not in text
 
 
@@ -404,15 +424,33 @@ def test_force_re_renders_even_unchanged_cards(tmp_path, monkeypatch):
     assert client.body_fetches == ["c1"]
 
 
-def test_moving_a_card_moves_its_file_and_leaves_no_duplicate(tmp_path, monkeypatch):
+def test_a_column_move_rewrites_the_same_path_not_moved_plus_removed(tmp_path, monkeypatch):
+    """§19.7's first acceptance gate: once a card is on the flat layout, a
+    column move is a content update at the SAME path — the state-file diff
+    must show `updated`, never `moved`+`removed`."""
     client, board = _kanban_setup(tmp_path, monkeypatch, [_card("c1", "Primeiro", "Backlog")])
     sync_mod.sync_kanban(client, board)
-    assert _tree(tmp_path) == {"backlog": ["primeiro.md"]}
+    assert _tree(tmp_path) == ["primeiro.md"]
 
     client.cards = [_card("c1", "Primeiro", "Done", last_edited="2026-08-14T00:00:00.000Z")]
     result = sync_mod.sync_kanban(client, board)
-    assert result["moved"] == 1
-    assert _tree(tmp_path) == {"done": ["primeiro.md"]}  # backlog/ pruned, not left empty
+    assert result["updated"] == 1
+    assert result["moved"] == 0
+    assert result["migrated"] == 0
+    assert any(line == "updated: notion/kanban/primeiro.md" for line in result["log"])
+    assert _tree(tmp_path) == ["primeiro.md"]
+    text = (_kanban_dir(tmp_path) / "primeiro.md").read_text()
+    assert "status: Done" in text
+
+
+def test_archived_statuses_land_flat_too(tmp_path, monkeypatch):
+    client, board = _kanban_setup(tmp_path, monkeypatch, [_card("c1", "Primeiro", "Backlog")])
+    sync_mod.sync_kanban(client, board)
+
+    client.cards = [_card("c1", "Primeiro", "Archived", last_edited="2026-08-14T00:00:00.000Z")]
+    result = sync_mod.sync_kanban(client, board)
+    assert result["updated"] == 1
+    assert _tree(tmp_path) == ["primeiro.md"]
 
 
 def test_a_card_gone_from_the_board_is_removed_from_the_mirror(tmp_path, monkeypatch):
@@ -423,7 +461,7 @@ def test_a_card_gone_from_the_board_is_removed_from_the_mirror(tmp_path, monkeyp
     client.cards = [c for c in client.cards if c["id"] == "c2"]
     result = sync_mod.sync_kanban(client, board)
     assert result["removed"] == 1
-    assert _tree(tmp_path) == {"done": ["segundo.md"]}
+    assert _tree(tmp_path) == ["segundo.md"]
 
 
 def test_the_kanban_mirror_never_writes_back_to_notion(tmp_path, monkeypatch):
@@ -431,12 +469,12 @@ def test_the_kanban_mirror_never_writes_back_to_notion(tmp_path, monkeypatch):
     notes/, this tree is derived. The file simply comes back."""
     client, board = _kanban_setup(tmp_path, monkeypatch, [_card("c1", "Primeiro", "Done")])
     sync_mod.sync_kanban(client, board)
-    (tmp_path / "knowledge_base" / "notion" / "kanban" / "done" / "primeiro.md").unlink()
+    (_kanban_dir(tmp_path) / "primeiro.md").unlink()
 
     result = sync_mod.sync_kanban(client, board)
     assert client.patched == []          # nothing archived
     assert result["added"] == 1          # just re-exported
-    assert _tree(tmp_path) == {"done": ["primeiro.md"]}
+    assert _tree(tmp_path) == ["primeiro.md"]
 
 
 def test_missing_database_id_is_a_503(tmp_path, monkeypatch):
@@ -447,6 +485,128 @@ def test_missing_database_id_is_a_503(tmp_path, monkeypatch):
         assert exc.status == 503
     else:
         raise AssertionError("expected NotionError")
+
+
+# ── §19 migration: flatten legacy status-dir cards ─────────────────────
+
+def test_a_legacy_card_is_left_untouched_when_the_flag_is_off(tmp_path, monkeypatch):
+    """The default. A workspace upgrading this app must not wake up to its
+    entire backlog flattened in one scan — that is exactly the bulk delete
+    the §7 valve exists to refuse."""
+    client, board = _kanban_setup(tmp_path, monkeypatch, [_card("c1", "Primeiro", "Backlog")])
+    rel = _legacy_card(tmp_path, "primeiro", "backlog")
+    _seed_legacy_state(tmp_path, {"c1": {"path": rel, "status_key": "backlog",
+                                         "last_edited": "2026-08-13T00:00:00.000Z"}})
+
+    result = sync_mod.sync_kanban(client, board)
+    assert result["migrated"] == 0
+    assert result["skipped"] == 1
+    assert (tmp_path / "knowledge_base" / rel).exists()        # still on the old path
+    assert not (_kanban_dir(tmp_path) / "primeiro.md").exists()  # not flattened
+
+
+def test_flag_on_flattens_a_legacy_card_old_removed_new_written_same_run(tmp_path, monkeypatch):
+    client, board = _kanban_setup(tmp_path, monkeypatch, [_card("c1", "Primeiro", "Backlog")])
+    rel = _legacy_card(tmp_path, "primeiro", "backlog")
+    _seed_legacy_state(tmp_path, {"c1": {"path": rel, "status_key": "backlog",
+                                         "last_edited": "2026-08-13T00:00:00.000Z"}})
+
+    result = sync_mod.sync_kanban(client, board, flatten_migration=True)
+    assert result["migrated"] == 1
+    assert not (tmp_path / "knowledge_base" / rel).exists()
+    assert _tree(tmp_path) == ["primeiro.md"]
+    state = json.loads(Path(sync_mod.state_path()).read_text())
+    assert state["kanban"]["c1"]["path"] == "notion/kanban/primeiro.md"
+
+
+def test_migration_batch_is_capped_per_run(tmp_path, monkeypatch):
+    cards = [_card(f"c{i}", f"Card {i}", "Backlog") for i in range(5)]
+    client, board = _kanban_setup(tmp_path, monkeypatch, cards)
+    entries = {}
+    for c in cards:
+        rel = _legacy_card(tmp_path, f"card-{c['id'][1:]}", "backlog")
+        entries[c["id"]] = {"path": rel, "status_key": "backlog",
+                            "last_edited": "2026-08-13T00:00:00.000Z"}
+    _seed_legacy_state(tmp_path, entries)
+
+    result = sync_mod.sync_kanban(client, board, flatten_migration=True, flatten_batch_limit=2)
+    assert result["migrated"] == 2
+    assert len(_tree(tmp_path)) == 2
+    assert result["skipped"] == 3
+
+    # the rest converge over the following runs, same budget each time
+    second = sync_mod.sync_kanban(client, board, flatten_migration=True, flatten_batch_limit=2)
+    assert second["migrated"] == 2
+    third = sync_mod.sync_kanban(client, board, flatten_migration=True, flatten_batch_limit=2)
+    assert third["migrated"] == 1
+    assert len(_tree(tmp_path)) == 5
+
+
+def test_migration_is_idempotent_across_a_simulated_crash(tmp_path, monkeypatch):
+    """The state file is flushed after every migrated card (not just once at
+    the end), so a crash mid-batch leaves disk and state consistent — the
+    next run picks up exactly where it left off, no duplicates, no errors."""
+    cards = [_card(f"c{i}", f"Card {i}", "Backlog") for i in range(3)]
+    client, board = _kanban_setup(tmp_path, monkeypatch, cards)
+    entries = {}
+    for c in cards:
+        rel = _legacy_card(tmp_path, f"card-{c['id'][1:]}", "backlog")
+        entries[c["id"]] = {"path": rel, "status_key": "backlog",
+                            "last_edited": "2026-08-13T00:00:00.000Z"}
+    _seed_legacy_state(tmp_path, entries)
+
+    # Simulate a crash: migrate the first card for real, then hand-roll what
+    # a crash right after would leave behind — disk already flattened for
+    # c0, state already reflecting it (sync_kanban flushes per migrated
+    # card), but the run never reached c1/c2.
+    first = sync_mod.sync_kanban(client, board, flatten_migration=True, flatten_batch_limit=1)
+    assert first["migrated"] == 1
+    state_after_crash = json.loads(Path(sync_mod.state_path()).read_text())
+    assert sum(1 for v in state_after_crash["kanban"].values()
+              if not sync_mod._is_legacy_kanban_path(v["path"])) == 1
+
+    # Re-run picks up the remaining two cleanly — no duplicate files, no
+    # exceptions, no re-processing of the already-flattened one.
+    second = sync_mod.sync_kanban(client, board, flatten_migration=True, flatten_batch_limit=10)
+    assert second["migrated"] == 2
+    assert len(_tree(tmp_path)) == 3
+    assert len(set(_tree(tmp_path))) == 3  # no duplicates
+
+
+def test_stale_dual_folder_leftovers_are_removed_on_migration(tmp_path, monkeypatch):
+    """The known bug (12 live cards): the status file a card moved OUT of was
+    never cleaned up, so the same slug exists in two status dirs. Flattening
+    must converge both into the single new flat file, absorbing the leftover
+    rather than leaving it to rot."""
+    client, board = _kanban_setup(tmp_path, monkeypatch, [_card("c1", "Primeiro", "Done")])
+    current_rel = _legacy_card(tmp_path, "primeiro", "done", content="current\n")
+    stale_rel = _legacy_card(tmp_path, "primeiro", "backlog", content="stale leftover\n")
+    _seed_legacy_state(tmp_path, {"c1": {"path": current_rel, "status_key": "done",
+                                         "last_edited": "2026-08-13T00:00:00.000Z"}})
+    assert (tmp_path / "knowledge_base" / stale_rel).exists()
+
+    result = sync_mod.sync_kanban(client, board, flatten_migration=True)
+    assert result["migrated"] == 1
+    assert not (tmp_path / "knowledge_base" / current_rel).exists()
+    assert not (tmp_path / "knowledge_base" / stale_rel).exists()
+    assert _tree(tmp_path) == ["primeiro.md"]
+
+
+def test_convergence_leaves_no_status_subdirectory_on_disk(tmp_path, monkeypatch):
+    cards = [_card("c1", "Primeiro", "Backlog"), _card("c2", "Segundo", "Done")]
+    client, board = _kanban_setup(tmp_path, monkeypatch, cards)
+    entries = {
+        "c1": {"path": _legacy_card(tmp_path, "primeiro", "backlog"),
+               "status_key": "backlog", "last_edited": "2026-08-13T00:00:00.000Z"},
+        "c2": {"path": _legacy_card(tmp_path, "segundo", "done"),
+               "status_key": "done", "last_edited": "2026-08-13T00:00:00.000Z"},
+    }
+    _seed_legacy_state(tmp_path, entries)
+
+    sync_mod.sync_kanban(client, board, flatten_migration=True)
+    kanban_root = _kanban_dir(tmp_path)
+    assert all(not (kanban_root / name).is_dir() for name in os.listdir(kanban_root))
+    assert sorted(f.name for f in kanban_root.iterdir()) == ["primeiro.md", "segundo.md"]
 
 
 # ── the two halves together ─────────────────────────────────────────────
@@ -603,7 +763,7 @@ def test_cards_with_the_same_title_do_not_overwrite_each_other(tmp_path, monkeyp
         _card("c3", "Único", "Done"),
     ])
     result = sync_mod.sync_kanban(client, board)
-    files = _tree(tmp_path)["done"]
+    files = _tree(tmp_path)
     assert len(files) == 3
     assert "único.md" in files                       # unique title keeps a clean name
     assert len([f for f in files if f.startswith("untitled-")]) == 2
@@ -619,15 +779,19 @@ def test_collisions_suffix_every_colliding_card_not_just_the_losers(tmp_path, mo
         _card("3645bf3b-9510-8000-0000-00000000bbbb", "Untitled", "Done"),
     ])
     sync_mod.sync_kanban(client, board)
-    assert _tree(tmp_path)["done"] == ["untitled-0000aaaa.md", "untitled-0000bbbb.md"]
+    assert _tree(tmp_path) == ["untitled-0000aaaa.md", "untitled-0000bbbb.md"]
 
 
-def test_same_title_in_different_statuses_needs_no_suffix(tmp_path, monkeypatch):
-    """They're in different directories — there's no collision to solve."""
+def test_same_title_in_different_statuses_now_needs_a_suffix_board_wide(tmp_path, monkeypatch):
+    """§19: status no longer separates cards into different directories, so
+    two cards sharing a title now collide board-wide regardless of status —
+    this is exactly the shape of the 12 known stale cross-status basename
+    duplicates the migration absorbs."""
     client, board = _kanban_setup(tmp_path, monkeypatch, [
-        _card("c1", "Deploy", "Done"), _card("c2", "Deploy", "Backlog")])
+        _card("3645bf3b-9510-8000-0000-00000000aaaa", "Deploy", "Done"),
+        _card("3645bf3b-9510-8000-0000-00000000bbbb", "Deploy", "Backlog")])
     sync_mod.sync_kanban(client, board)
-    assert _tree(tmp_path) == {"backlog": ["deploy.md"], "done": ["deploy.md"]}
+    assert _tree(tmp_path) == ["deploy-0000aaaa.md", "deploy-0000bbbb.md"]
 
 
 def test_a_card_whose_slug_gained_a_suffix_is_moved_not_duplicated(tmp_path, monkeypatch):
@@ -635,13 +799,13 @@ def test_a_card_whose_slug_gained_a_suffix_is_moved_not_duplicated(tmp_path, mon
     b = "3645bf3b-9510-8000-0000-00000000bbbb"
     client, board = _kanban_setup(tmp_path, monkeypatch, [_card(a, "Untitled", "Done")])
     sync_mod.sync_kanban(client, board)
-    assert _tree(tmp_path)["done"] == ["untitled.md"]
+    assert _tree(tmp_path) == ["untitled.md"]
 
     # a second card with the same title shows up → both must gain a suffix
     client.cards.append(_card(b, "Untitled", "Done"))
     client.children[b] = [_para("corpo")]
     sync_mod.sync_kanban(client, board)
-    assert _tree(tmp_path)["done"] == ["untitled-0000aaaa.md", "untitled-0000bbbb.md"]
+    assert _tree(tmp_path) == ["untitled-0000aaaa.md", "untitled-0000bbbb.md"]
 
 
 def test_tracked_card_count_matches_files_on_disk(tmp_path, monkeypatch):
@@ -651,7 +815,7 @@ def test_tracked_card_count_matches_files_on_disk(tmp_path, monkeypatch):
              for i in range(12)]
     client, board = _kanban_setup(tmp_path, monkeypatch, cards)
     result = sync_mod.sync_kanban(client, board)
-    on_disk = sum(len(v) for v in _tree(tmp_path).values())
+    on_disk = len(_tree(tmp_path))
     assert result["cards"] == on_disk == 12
 
 
@@ -666,5 +830,5 @@ def test_the_suffix_comes_from_the_id_tail_not_its_shared_prefix(tmp_path, monke
         _card("3a45bf3b-9510-81a2-0000-000000000003", "Mesmo Título", "Done"),
     ])
     result = sync_mod.sync_kanban(client, board)
-    assert len(_tree(tmp_path)["done"]) == 3
+    assert len(_tree(tmp_path)) == 3
     assert result["cards"] == 3

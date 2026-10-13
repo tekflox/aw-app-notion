@@ -18,8 +18,9 @@ reachable from an agent, the UI, or curl.
 
 Two mirrors, one command:
 
-* ``notion/notes/``            — child pages under ``sync_root_page_id``
-* ``notion/kanban/<status>/``  — every Kanban card, filed by its status
+* ``notion/notes/``   — child pages under ``sync_root_page_id``
+* ``notion/kanban/``  — every Kanban card, flat by slug (status lives in
+  frontmatter — §19 of docs/design/aw-knowledgeable-fs-sync.md)
 
 Usage:
     aw-workspace-cli notion-sync                      # both, changed only
@@ -30,6 +31,9 @@ Usage:
     aw-workspace-cli notion-sync --no-bidirectional   # pull-only
     aw-workspace-cli notion-sync --no-rebuild         # skip the KB reindex
     aw-workspace-cli notion-sync --status             # what the last sync did
+    aw-workspace-cli notion-sync --flatten-migration  # §19: flatten up to
+                                                       # 100 more legacy
+                                                       # status-dir cards
 """
 from __future__ import annotations
 
@@ -69,6 +73,11 @@ def _build_parser() -> argparse.ArgumentParser:
                             "to the Kanban mirror, which is derived, not a source.")
     group.add_argument("--no-bidirectional", dest="bidirectional", action="store_false",
                        help="Pull-only (overrides the app's saved setting)")
+    parser.add_argument("--flatten-migration", action="store_true",
+                        help="§19: flatten up to 100 more legacy status-dir Kanban "
+                             "cards to the flat notion/kanban/<slug>.md layout this "
+                             "run (overrides the app's saved setting; off by default "
+                             "so a routine sync never flattens anything)")
     return parser
 
 
@@ -88,6 +97,8 @@ def run(args: list[str] | None = None) -> int:
                   "notes": not parsed.kanban_only, "kanban": not parsed.notes_only}
     if parsed.bidirectional is not None:
         body["bidirectional"] = parsed.bidirectional
+    if parsed.flatten_migration:
+        body["flatten_migration"] = True
 
     direction = "↔" if parsed.bidirectional else "→"
     print(f"Syncing Notion {direction} the knowledge base"
@@ -128,7 +139,9 @@ def run(args: list[str] | None = None) -> int:
         parts = [f"{kanban['added']} added", f"{kanban['updated']} updated",
                  f"{kanban['skipped']} skipped"]
         if kanban.get("moved"):
-            parts.append(f"{kanban['moved']} moved status")
+            parts.append(f"{kanban['moved']} moved (title edit)")
+        if kanban.get("migrated"):
+            parts.append(f"{kanban['migrated']} flattened (§19 migration)")
         if kanban.get("removed"):
             parts.append(f"{kanban['removed']} removed")
         print(f"kanban: {', '.join(parts)}  → {kanban.get('kanban_dir', '')}")
@@ -179,6 +192,8 @@ def _print_status(local_client) -> int:
           f"  ({body.get('tracked_cards', 0)} cards)")
     print(f"  comments:    {body.get('kanban_comments')}")
     print(f"  dir:         {body.get('kanban_dir')}")
+    print(f"  §19 flatten migration: {body.get('kanban_flatten_migration')}"
+          f"  ({body.get('kanban_legacy_remaining', 0)} legacy cards left to flatten)")
     for key, count in (body.get("cards_by_status") or {}).items():
         print(f"    {key:<24} {count}")
     return 0

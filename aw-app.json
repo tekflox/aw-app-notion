@@ -145,6 +145,11 @@
         "type": "boolean",
         "default": true,
         "description": "Include each card's comment thread in its exported markdown. On this board the comments are where the delivery reports and QA verdicts live, so this is on by default. Costs one extra Notion call per changed card. Note that posting a comment does not bump a page's last_edited_time, so a comment-only change is picked up by --force, not by an incremental run."
+      },
+      "kanban_flatten_migration": {
+        "type": "boolean",
+        "default": false,
+        "description": "One-time §19 migration: flattens up to 100 Kanban mirror cards still on the pre-flatten notion/kanban/<status>/<slug>.md layout to the flat notion/kanban/<slug>.md layout per sync run, so the ~1,649-card backlog is never presented to fs-sync's mass-delete valve in one scan. Off by default — a routine sync never flattens anything unless this is turned on (or overridden per call with --flatten-migration). Leave on across repeated runs until GET /api/apps/notion/sync/state reports kanban_legacy_remaining=0, then turn it back off."
       }
     },
     "required": []

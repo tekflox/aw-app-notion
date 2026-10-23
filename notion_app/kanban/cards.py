@@ -59,6 +59,17 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _file_block_label(block: dict) -> str:
+    """Filename/caption text for a file/pdf/image block — what a caller who
+    only remembers "the PDF I attached last week" would recognise, since
+    they never see the block_id Notion assigned it."""
+    btype = block.get("type", "")
+    data = block.get(btype, {})
+    name = data.get("name") or ""
+    caption = "".join(t.get("plain_text", "") for t in data.get("caption", []))
+    return name or caption
+
+
 class KanbanBoard:
     def __init__(self, client: NotionClient, config: KanbanConfig,
                  presentations: Any = None) -> None:
@@ -267,6 +278,42 @@ class KanbanBoard:
         return {"ok": True, "page_id": page_id, "filename": filename,
                 "bytes": len(content), "block_type": media_type,
                 "file_upload_id": upload_id}
+
+    def delete_block(self, page_id: str, block_id: str = "", match: str = "") -> dict:
+        """Remove a block — either directly by ``block_id``, or by matching
+        a top-level file/pdf/image block's filename/caption on ``page_id``
+        when the caller only has that (the common case after
+        ``attach_file``/``upload_file_to_page``, which never hand back a
+        block_id).
+
+        Archives rather than hard-deletes — see ``NotionClient.delete_block``.
+        """
+        block_id = (block_id or "").strip()
+        if not block_id:
+            match = (match or "").strip()
+            if not match:
+                return {"ok": False, "error": "pass either block_id or match (a filename/caption substring)"}
+            if not page_id:
+                return {"ok": False, "error": "page_id is required when matching by filename/caption"}
+            # Imported here, not at module scope: sync.py imports this module,
+            # so a top-level import back into it is a cycle.
+            from ..sync import _get_block_children
+            needle = match.lower()
+            candidates = [
+                b for b in _get_block_children(self.client, page_id)
+                if b.get("type") in ("file", "pdf", "image")
+                and needle in _file_block_label(b).lower()
+            ]
+            if not candidates:
+                return {"ok": False, "error": f"no file/pdf/image block on {page_id} matches '{match}'"}
+            if len(candidates) > 1:
+                return {"ok": False,
+                        "error": f"'{match}' matches {len(candidates)} blocks — be more specific or pass block_id directly",
+                        "candidates": [{"block_id": b["id"], "label": _file_block_label(b)} for b in candidates]}
+            block_id = candidates[0]["id"]
+
+        self.client.delete_block(block_id)
+        return {"ok": True, "page_id": page_id, "block_id": block_id}
 
     @property
     def presentations(self):

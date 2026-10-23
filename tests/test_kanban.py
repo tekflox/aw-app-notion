@@ -107,6 +107,9 @@ class FakeClient:
         self.uploads.append((filename, content, content_type))
         return f"upload-{len(self.uploads)}"
 
+    def delete_block(self, block_id):
+        return self.request("DELETE", f"/blocks/{block_id}")
+
 
 class FakeCtx:
     def __init__(self, config=None):
@@ -889,6 +892,113 @@ def test_upload_file_refuses_something_notion_would_reject(monkeypatch):
         assert exc.status == 413
     else:
         raise AssertionError("expected NotionError")
+
+
+# ── delete_block_from_page ───────────────────────────────────────────────
+# Archives a block — either directly by block_id, or by matching a
+# filename/caption substring among the page's file/pdf/image blocks, since
+# attach_file/upload_file_to_page never hand back a block_id to begin with.
+
+def test_delete_block_from_page_is_advertised_and_handled():
+    listed = {t["name"] for t in http_handler.TOOLS_SCHEMA}
+    assert "delete_block_from_page" in listed
+    assert "delete_block_from_page" in http_handler.HANDLERS
+
+
+def test_delete_block_by_block_id_skips_the_lookup():
+    board, fake = _board()
+    result = board.delete_block("page-1", block_id="block-9")
+
+    assert result == {"ok": True, "page_id": "page-1", "block_id": "block-9"}
+    assert fake.calls == [("DELETE", "/blocks/block-9", None)]
+
+
+def test_delete_block_by_match_finds_the_right_file_block():
+    board, fake = _board(responses={
+        ("GET", "/blocks/page-1/children?page_size=100"): {"results": [
+            {"id": "block-1", "type": "paragraph", "paragraph": {"rich_text": []}},
+            {"id": "block-2", "type": "pdf", "pdf": {"name": "old-report.pdf", "caption": []}},
+            {"id": "block-3", "type": "image", "image": {"caption": [
+                {"plain_text": "latest screenshot"}]}},
+        ]},
+    })
+
+    result = board.delete_block("page-1", match="old-report")
+
+    assert result == {"ok": True, "page_id": "page-1", "block_id": "block-2"}
+    assert fake.calls[-1] == ("DELETE", "/blocks/block-2", None)
+
+
+def test_delete_block_by_match_matches_on_caption_too():
+    board, fake = _board(responses={
+        ("GET", "/blocks/page-1/children?page_size=100"): {"results": [
+            {"id": "block-1", "type": "image", "image": {"caption": [
+                {"plain_text": "source screenshot"}]}},
+        ]},
+    })
+
+    result = board.delete_block("page-1", match="screenshot")
+
+    assert result["ok"] is True
+    assert result["block_id"] == "block-1"
+
+
+def test_delete_block_by_match_rejects_an_ambiguous_match():
+    board, fake = _board(responses={
+        ("GET", "/blocks/page-1/children?page_size=100"): {"results": [
+            {"id": "block-1", "type": "pdf", "pdf": {"name": "report-v1.pdf", "caption": []}},
+            {"id": "block-2", "type": "pdf", "pdf": {"name": "report-v2.pdf", "caption": []}},
+        ]},
+    })
+
+    result = board.delete_block("page-1", match="report")
+
+    assert result["ok"] is False
+    assert len(result["candidates"]) == 2
+    assert fake.calls == [("GET", "/blocks/page-1/children?page_size=100", None)]
+
+
+def test_delete_block_by_match_reports_no_match():
+    board, fake = _board(responses={
+        ("GET", "/blocks/page-1/children?page_size=100"): {"results": []},
+    })
+
+    result = board.delete_block("page-1", match="nope")
+
+    assert result["ok"] is False
+    assert "no file/pdf/image block" in result["error"]
+
+
+def test_delete_block_requires_block_id_or_match():
+    board, _ = _board()
+    result = board.delete_block("page-1")
+    assert result["ok"] is False
+    assert "block_id or match" in result["error"]
+
+
+def test_delete_block_by_match_requires_a_page_id():
+    board, _ = _board()
+    result = board.delete_block("", match="old-report")
+    assert result["ok"] is False
+    assert "page_id is required" in result["error"]
+
+
+def test_delete_block_handler_resolves_page_id_from_context():
+    """A card-bound run can omit page_id and still match by filename — the
+    same NOTION_TASK_ID fallback every other Kanban tool gets."""
+    board, fake = _board(responses={
+        ("GET", "/blocks/page-ctx/children?page_size=100"): {"results": [
+            {"id": "block-1", "type": "pdf", "pdf": {"name": "old-report.pdf", "caption": []}},
+        ]},
+    })
+    resp = asyncio.run(http_handler.handle_request(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+         "params": {"name": "delete_block_from_page",
+                    "arguments": {"match": "old-report",
+                                  "_aw_context": {"NOTION_TASK_ID": "page-ctx"}}}},
+        board=board))
+    assert resp["result"]["isError"] is False
+    assert fake.calls[-1] == ("DELETE", "/blocks/block-1", None)
 
 
 # ── attach_kanban_presentation ──────────────────────────────────────────

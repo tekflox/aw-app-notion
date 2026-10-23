@@ -163,6 +163,13 @@ class NotionClient:
         return self.request("POST", "/comments",
                             {"parent": {"page_id": page_id}, "rich_text": rich_text})
 
+    def delete_block(self, block_id: str) -> dict:
+        """Archive a block. Notion's API has no permanent hard-delete for a
+        block — DELETE sets ``archived: true``, the same thing the trash icon
+        in the UI does, and the block can still be restored from Notion's own
+        trash."""
+        return self.request("DELETE", f"/blocks/{block_id}")
+
     # ── file upload ─────────────────────────────────────────────────────
     def upload_file(self, filename: str, content: bytes,
                     content_type: str | None = None) -> str:

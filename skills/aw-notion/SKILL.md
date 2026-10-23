@@ -72,6 +72,7 @@ gateway's actual `tools/list` output rather than trusting this table blind
 | `API-query-data-source` | Query rows with filters/sorts — the equivalent of the old "query a database" call. |
 | `API-list-data-source-templates` | See templates available for a data source. |
 | `API-create-a-comment` / `API-retrieve-a-comment` | Post/read comments on a page. |
+| `API-delete-a-block` | Archive a block by its `block_id` (Notion's API has no permanent hard-delete — this is the same thing the UI's trash icon does, and the block can still be restored from Notion's own trash). Needs the id already in hand; pair with `API-get-block-children` to find it, or use `delete_block_from_page` below if all you have is a filename/caption. |
 
 ## Attaching a real file (PDF, image, …) to a page
 
@@ -98,6 +99,26 @@ came from somewhere else), and the same 20 MB single-part ceiling as
 `attach_kanban_file` applies. Same prerequisite as everything else here: the
 target page must already be shared with the integration, or the call fails
 with `object_not_found`.
+
+## Removing a block (e.g. a superseded file attachment)
+
+`API-delete-a-block` (above) archives a block if you already have its
+`block_id`. The common case — cleaning up a stale PDF left behind by
+`upload_file_to_page`/`attach_kanban_file` — is that you only remember the
+filename or caption, not the block_id those tools never hand back. For that,
+`delete_block_from_page`, from this app's **other** MCP server (the same
+`aw-kanban` one `upload_file_to_page` lives on — see `aw-kanban/SKILL.md`),
+looks the block up for you:
+
+```
+delete_block_from_page(page_id, block_id=None, match=None)
+```
+
+Pass `block_id` directly if you have it, or `match` — a filename/caption
+substring — and it searches the page's top-level file/pdf/image blocks for
+you, failing with the list of candidates if `match` is ambiguous. Same
+behaviour as `API-delete-a-block`: this archives, it does not permanently
+delete.
 
 ## IDs
 

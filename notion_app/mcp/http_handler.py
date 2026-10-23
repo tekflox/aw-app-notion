@@ -328,6 +328,29 @@ TOOLS_SCHEMA: list[dict] = [
         },
     },
     {
+        "name": "delete_block_from_page",
+        "description": (
+            "Remove a block from a Notion page — e.g. a superseded file attachment "
+            "left behind by upload_file_to_page/attach_kanban_file. Archives the block "
+            "(Notion's API has no permanent hard-delete; this is the same thing the "
+            "trash icon in the UI does, and it can still be restored from Notion's own "
+            "trash).\n\n"
+            "Pass block_id directly if you have it. Otherwise pass match — a filename "
+            "or caption substring — and this looks it up among the page's top-level "
+            "file/pdf/image blocks for you, since upload_file_to_page/attach_kanban_file "
+            "never hand back a block_id to begin with. Fails with the list of candidates "
+            "if match is ambiguous."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "page_id": {"type": "string", "description": _UPLOAD_PAGE_ID_DESC + " Required when using match instead of block_id."},
+                "block_id": {"type": "string", "description": "Id of the block to delete, if already known."},
+                "match": {"type": "string", "description": "Filename or caption substring to find the block by, when block_id isn't known. Must match exactly one file/pdf/image block on page_id."},
+            },
+        },
+    },
+    {
         "name": "attach_kanban_presentation",
         "description": (
             "Attach an aw-presentation to a Kanban card: exports it to PNG and attaches "
@@ -445,6 +468,10 @@ def _h_upload_file_to_page(board: KanbanBoard, args: dict) -> dict:
     return board.attach_file(page_id, args.get("file_path") or "", args.get("caption") or "")
 
 
+def _h_delete_block(board: KanbanBoard, args: dict) -> dict:
+    return board.delete_block(_page_id(args), args.get("block_id") or "", args.get("match") or "")
+
+
 def _h_attach_presentation(board: KanbanBoard, args: dict) -> dict:
     page_id = _page_id(args)
     if not page_id:
@@ -465,6 +492,7 @@ HANDLERS = {
     "set_blocker": _h_blocker,
     "attach_kanban_file": _h_attach_file,
     "upload_file_to_page": _h_upload_file_to_page,
+    "delete_block_from_page": _h_delete_block,
     "attach_kanban_presentation": _h_attach_presentation,
 }
 

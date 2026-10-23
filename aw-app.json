@@ -73,6 +73,7 @@
         "set_blocker",
         "attach_kanban_file",
         "upload_file_to_page",
+        "delete_block_from_page",
         "attach_kanban_presentation"
       ]
     },

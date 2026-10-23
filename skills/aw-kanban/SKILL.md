@@ -218,6 +218,24 @@ was written — either this workspace has no published URL, or the share call
 failed; the `note` says which. That is not a reason to retry the whole call,
 which would attach the image a second time.
 
+**Removing a block — `delete_block_from_page`.** Removes a block from any
+page the integration can see — most often a superseded file attachment left
+behind by `attach_kanban_file`/`upload_file_to_page`, since neither of those
+hands back a `block_id` to delete it with later:
+
+```
+delete_block_from_page(page_id, block_id=None, match=None)
+```
+
+Pass `block_id` directly if you have it. Otherwise pass `match` — a
+filename or caption substring — and it looks the block up among the page's
+top-level file/pdf/image blocks for you. Fails with the full list of
+candidates if `match` hits more than one block, rather than guessing which
+one you meant. Archives rather than permanently deletes — Notion's API has
+no hard-delete for a block, same as the upstream `API-delete-a-block` tool
+(see the `aw-notion` skill), which this exists alongside for the case where
+you don't already have a `block_id`.
+
 **Not ported here, on purpose:**
 
 - **`invoke_kanban_agent` / `run_ready_cards`.** Both dispatch and resume

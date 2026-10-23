@@ -95,6 +95,8 @@ So `create_kanban_task` creates the card and stops, and `move_kanban_task(status
 
 `attach_kanban_presentation` **is** ported too — it exports the deck to PNG through aw-app-presentations, attaches that, then appends a live share link right after it. This is the only place the app talks to a service that isn't Notion (`notion_app/presentations.py`); the calls go over loopback so a slow render doesn't hit the tunnel edge's ~30s cut, while the link written into the card uses the published URL so a human can actually open it.
 
+`delete_block_from_page` is new, not a port — the delete-side sibling of `upload_file_to_page`. The vendored official `@notionhq/notion-mcp-server` already exposes `API-delete-a-block`, but it only takes a `block_id`, which neither `attach_kanban_file` nor `upload_file_to_page` hands back — a caller cleaning up a stale attachment only has the filename or caption. This tool takes `page_id` (optional, same `NOTION_TASK_ID` auto-fill as the rest of this server) plus either `block_id` directly or `match` (a filename/caption substring), looks the block up among the page's top-level file/pdf/image blocks when given `match`, and archives it via `DELETE /v1/blocks/{block_id}` — Notion's API has no permanent hard-delete, so this is the same thing the UI's trash icon does.
+
 **Not ported, and shouldn't be here:** `invoke_kanban_agent` and `run_ready_cards`. Both dispatch agents-platform runs — they belong in aw-app-agents-platform-runners.
 
 ## What It Delivers

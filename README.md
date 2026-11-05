@@ -102,3 +102,5 @@ So `create_kanban_task` creates the card and stops, and `move_kanban_task(status
 ## What It Delivers
 
 The app gives AW Workspace controlled Notion access. Users decide what the integration can see, and agents can work with that shared Notion content — including a real Kanban board — when tasks require it.
+
+<!-- devteam: follow-up no-op PR proving the comment/workflow_run review paths (fleet migration B3) -->

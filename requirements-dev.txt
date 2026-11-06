@@ -1,0 +1,6 @@
+pytest-asyncio>=0.23  # only if your tests are async (real sockets, asyncio servers)
+pytest-cov>=5.0  # .github/workflows/test.yml's coverage gate (pyproject.toml [tool.coverage.report] fail_under=82)
+pylint>=3.2  # .pre-commit-config.yaml's E-class gate, same as CI
+ruff>=0.7  # .pre-commit-config.yaml's ruff hook
+pre-commit>=3.8  # `pre-commit install` wires up .pre-commit-config.yaml
+jsonschema>=4.0  # tests/validate_manifest.py's own import

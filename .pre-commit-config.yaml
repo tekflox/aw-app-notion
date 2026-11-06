@@ -1,0 +1,55 @@
+# pre-commit — fast local subset of CI, per docs/standards/pipeline-testing.md §6.
+#
+# NOT a replacement for CI: hooks are bypassable (--no-verify) and are not
+# installed on a fresh clone until `pre-commit install` is run. The test
+# suite is deliberately NOT a hook here — see §6's three reasons.
+#
+# Install once per clone:
+#   pip install -r requirements-dev.txt && pre-commit install
+#
+# ruff-format is deliberately NOT enabled yet: this codebase has never been
+# ruff-formatted (measured 2026-11-06: 23 of 30 files would reformat), and
+# ruff-format rewrites a hook's target file in full. Needs its own one-time
+# format commit first — see §6b.
+#
+# The ruff hook's select overrides pyproject.toml's (which includes `I` for
+# import sorting, per §6b) down to E4,E7,E9,F — per §6c: this repo's import
+# baseline is not clean (11 I001 findings measured 2026-11-06, the most of
+# any repo in this batch), so a bare `--fix` would silently reorder imports
+# on whatever file a commit happens to touch. Leave `I` to CI's report-only
+# ruff run until that baseline is genuinely zero, then lift this override.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.3
+    hooks:
+      - id: ruff
+        args: [--fix, --select, "E4,E7,E9,F"]
+
+  - repo: local
+    hooks:
+      - id: pylint-errors-only
+        name: pylint (E-class only, blocking — same gate as CI)
+        entry: pylint --disable=all --enable=E --disable=E0401,E1101
+        language: system
+        types: [python]
+        files: ^notion_app/
+
+      - id: validate-manifest
+        name: validate aw-app.json
+        entry: python3 tests/validate_manifest.py
+        language: system
+        pass_filenames: false
+        files: ^aw-app\.json$
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+      - id: check-merge-conflict
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks

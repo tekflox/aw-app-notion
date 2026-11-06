@@ -5,14 +5,19 @@ name: Test
 # in this same directory), plus a report-only `lint` job.
 #
 # This repo is `tier: inprocess` (aw-app.json) — it runs inside aw-workspace
-# core's own Python process and has no `requirements.txt`/`pyproject.toml` of
-# its own; its runtime deps are core's. The exact same gap already exists for
+# core's own Python process and has no `requirements.txt` of its own; its
+# runtime deps are core's. The exact same gap already exists for
 # `release.yml` (tekflox/aw-marketplace's `app-release.yml`), which already
 # runs `python3 -m pytest tests/ -q` against this repo on every push to
 # master with nothing more than `pip install pytest jsonschema fastapi httpx
-# uvicorn` (+ requirements.txt/requirements-dev.txt IF present — neither is,
-# here) — confirmed green locally with this exact install set (176 passed)
-# before this file was added.
+# uvicorn` (+ requirements.txt/requirements-dev.txt IF present).
+#
+# `pytest` now also carries the docs/standards/pipeline-testing.md §4.2
+# coverage ratchet (pyproject.toml's fail_under, added alongside this
+# change) and the §5.2 blocking pylint E-class gate — the shared
+# app-release.yml has no coverage/lint step yet (Phase 3 of the standard,
+# a separate repo), so this repo's own gate carries it until then, same
+# pattern as aw-app-template/aw-app-kb.
 #
 # No `paths:` filter on `pull_request`, deliberately: the review/merge loop
 # requires this job's check to be PRESENT and passing before it will merge
@@ -53,14 +58,34 @@ jobs:
             pip install -q -r requirements-dev.txt
           fi
 
-      - name: Run test suite
-        run: python3 -m pytest tests/ -q
+      - name: Test suite + coverage gate
+        # fail_under is read from pyproject.toml's [tool.coverage.report] —
+        # a one-way ratchet, see docs/standards/pipeline-testing.md §4.2.
+        run: |
+          python3 -m pytest --cov=notion_app --cov-report=term-missing \
+            --cov-report=html --cov-report=xml tests/ -q
 
-  # Report-only: this repo has no `pyproject.toml` and has not been through
-  # the triage pass docs/standards/pipeline-testing.md's Tier-B rollout
-  # requires before a pylint error-class gate can block merges. Ruff with
-  # its own defaults needs no repo config and gives a baseline without
-  # inventing an un-triaged blocking gate as a side effect of adding CI.
+      - name: Upload coverage report artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: |
+            htmlcov/
+            coverage.xml
+          retention-days: 30
+
+      - name: Lint (pylint E-class, blocking)
+        # --errors-only per §5.2, minus E0401/E1101 — same disable set as
+        # aw-app-template/aw-app-kb. Measured 2026-11-06: one real finding
+        # (E1136, notion_app/sync.py — an astroid-inference false positive
+        # on a dict-literal-typed key, same class as E1101), disabled
+        # inline at the site with a reason.
+        run: pylint notion_app --disable=all --enable=E --disable=E0401,E1101
+
+  # Report-only: ruff with its own defaults, plus the repo's new
+  # pyproject.toml [tool.ruff.lint] select (E4,E7,E9,F,I) once this PR
+  # lands. Stays report-only per §5.3 — pylint owns the blocking gate.
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10

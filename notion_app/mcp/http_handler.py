@@ -124,7 +124,7 @@ TOOLS_SCHEMA: list[dict] = [
         "description": (
             "Create a Notion Kanban finding card. Deduplicates by finding_key: an existing "
             "card with the same key is bumped instead (OccurrenceCount +1, LastSeenAt "
-            "updated, a '🔁 Re-detectado' callout appended) and a card that was already "
+            "updated, a '🔁 Re-detected' callout appended) and a card that was already "
             "Done is reopened to Backlog as a regression. The card is created in Backlog. "
             "NOTE: unlike the monolith's version of this tool, no Telegram approval is "
             "sent and no agent run is dispatched — that is agents-platform's job and is "
@@ -135,7 +135,7 @@ TOOLS_SCHEMA: list[dict] = [
             "properties": {
                 "title": {"type": "string", "description": "Card title — short, descriptive."},
                 "finding_key": {"type": "string", "description": "Stable dedup slug: 'category:subject-kebab', e.g. 'resilience:no-health-check-caddy'."},
-                "priority": {"type": "string", "enum": ["Alta", "Média", "Baixa"], "description": "Finding priority."},
+                "priority": {"type": "string", "enum": ["High", "Medium", "Low"], "description": "Finding priority."},
                 "agent_slug": {"type": "string", "description": "Executor agent slug (e.g. 'coder-sonnet', 'doc-writer', 'debugger')."},
                 "target_slug": {"type": "string", "description": "agents-platform target slug. Recorded on the card only — not validated, since this app doesn't talk to agents-platform."},
                 "input_text": {"type": "string", "description": "Task instructions for the executor, written into the card body. Be specific about what to fix and where."},
@@ -394,7 +394,7 @@ def _h_get_card(board: KanbanBoard, args: dict) -> dict:
 def _h_create(board: KanbanBoard, args: dict) -> dict:
     return board.create_card(
         title=args.get("title") or "", finding_key=args.get("finding_key") or "",
-        priority=args.get("priority") or "Média", agent_slug=args.get("agent_slug") or "",
+        priority=args.get("priority") or "Medium", agent_slug=args.get("agent_slug") or "",
         target_slug=args.get("target_slug") or "", input_text=args.get("input_text") or "",
         check_hint=args.get("check_hint") or "", description=args.get("description") or "",
         plan=args.get("plan") or "", source=args.get("source") or "",

@@ -442,7 +442,7 @@ class KanbanBoard:
         return result
 
     # ── create ──────────────────────────────────────────────────────────
-    def create_card(self, *, title: str, finding_key: str = "", priority: str = "Média",
+    def create_card(self, *, title: str, finding_key: str = "", priority: str = "Medium",
                     agent_slug: str = "", target_slug: str = "", input_text: str = "",
                     check_hint: str = "", description: str = "", plan: str = "",
                     source: str = "", tags: list[str] | None = None) -> dict:
@@ -513,10 +513,10 @@ class KanbanBoard:
                 "icon": {"type": "emoji", "emoji": "🔍"},
                 "color": "yellow_background",
             }})
-        children.append(heading_block("🎯 Instruções para o executor"))
+        children.append(heading_block("🎯 Instructions for the Executor"))
         children.extend(paragraph_blocks(input_text))
         if plan:
-            children.append(heading_block("📋 Análise & Plano de Execução"))
+            children.append(heading_block("📋 Analysis & Execution Plan"))
             children.extend(paragraph_blocks(plan))
 
         page = self.client.create_page(
@@ -565,15 +565,15 @@ class KanbanBoard:
         if patch:
             self.client.patch_page(page_id, patch)
 
-        note = " ⚠ REGRESSÃO" if is_regression else ""
+        note = " ⚠ REGRESSION" if is_regression else ""
         blocks: list[dict] = [{"object": "block", "type": "callout", "callout": {
             "rich_text": [{"type": "text", "text": {
-                "content": f"🔁 Re-detectado em {today}{note} (ocorrência #{occ})"}}],
+                "content": f"🔁 Re-detected on {today}{note} (occurrence #{occ})"}}],
             "icon": {"type": "emoji", "emoji": "🔁"},
             "color": "orange_background" if is_regression else "gray_background",
         }}]
         if plan:
-            blocks.append(heading_block(f"📋 Plano — {today}"))
+            blocks.append(heading_block(f"📋 Plan — {today}"))
             blocks.extend(paragraph_blocks(plan))
         self.client.append_blocks(page_id, blocks)
 

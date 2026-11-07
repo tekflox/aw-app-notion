@@ -229,7 +229,7 @@ def _render_page(client: NotionClient, page_id: str) -> tuple[str, str, str] | N
 
     body = _blocks_to_md(client, _get_block_children(client, page_id))
     if not body.strip():
-        body = "*(página vazia)*"
+        body = "*(empty page)*"
 
     full_content = f"# {title}\n\n{body}"
     content = "\n".join([
@@ -449,7 +449,7 @@ def _render_card(client: NotionClient, card: dict, statuses: dict[str, str],
 
     ``rel_path`` is flat (``KANBAN_SUBDIR/<slug>.md``, §19) — status lives
     only in frontmatter (``status``/``status_key`` below) and in the
-    rendered "Propriedades" section, never in the path, so a column move is
+    rendered "Properties" section, never in the path, so a column move is
     a content update at a stable path, never a rename.
     """
     from .kanban.client import extract_property_value, page_title
@@ -470,10 +470,10 @@ def _render_card(client: NotionClient, card: dict, statuses: dict[str, str],
     meta = [f"- **{k}**: {v}" for k, v in sorted(plain.items())
             if v not in (None, "", [], False) and k not in ("Status",)]
     if meta:
-        sections += ["## Propriedades", "", *meta, ""]
-    sections += ["## Conteúdo", "", body or "*(card sem corpo)*", ""]
+        sections += ["## Properties", "", *meta, ""]
+    sections += ["## Content", "", body or "*(card has no body)*", ""]
     if comments:
-        sections += ["## Comentários", "", comments, ""]
+        sections += ["## Comments", "", comments, ""]
     full_content = "\n".join(sections).strip()
 
     content = "\n".join([

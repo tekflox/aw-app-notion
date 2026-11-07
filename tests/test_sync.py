@@ -261,7 +261,9 @@ def test_empty_page_gets_a_placeholder_body(tmp_path, monkeypatch):
     client = _setup(tmp_path, monkeypatch, titles=("Vazia",))
     client.children["page-0"] = []
     sync_mod.sync_notes(client, ROOT_PAGE)
-    assert "*(página vazia)*" in (_note(tmp_path, "vazia.md")).read_text()
+    text = (_note(tmp_path, "vazia.md")).read_text()
+    assert "*(empty page)*" in text
+    assert "página vazia" not in text
 
 
 # ── kanban mirror ───────────────────────────────────────────────────────
@@ -388,7 +390,21 @@ def test_card_markdown_carries_status_in_frontmatter_not_the_path(tmp_path, monk
     assert "notion_id: c1" in text
     assert "- **Source**: system-analyst" in text
     assert "corpo de c1" in text
-    assert "## Comentários" in text and "entregue" in text
+    assert "## Properties" in text
+    assert "## Content" in text
+    assert "## Comments" in text and "entregue" in text
+    # Regression guard: the mirror's own fixed headings must be English —
+    # localization:kanban-card-template-english.
+    assert "Propriedades" not in text and "Conteúdo" not in text and "Comentários" not in text
+
+
+def test_card_with_no_body_gets_an_english_placeholder(tmp_path, monkeypatch):
+    client, board = _kanban_setup(tmp_path, monkeypatch, [_card("c1", "Vazio", "Backlog")])
+    client.children["c1"] = []
+    sync_mod.sync_kanban(client, board)
+    text = (_kanban_dir(tmp_path) / "vazio.md").read_text()
+    assert "*(card has no body)*" in text
+    assert "card sem corpo" not in text
 
 
 def test_a_status_with_no_logical_key_still_resolves(tmp_path, monkeypatch):
@@ -411,7 +427,7 @@ def test_comments_can_be_turned_off(tmp_path, monkeypatch):
     client.comments = {"c1": [{"created_time": "x", "rich_text": [{"plain_text": "oi"}]}]}
     sync_mod.sync_kanban(client, board, with_comments=False)
     text = (_kanban_dir(tmp_path) / "primeiro.md").read_text()
-    assert "## Comentários" not in text
+    assert "## Comments" not in text
 
 
 def test_unchanged_cards_skip_without_fetching_their_body(tmp_path, monkeypatch):

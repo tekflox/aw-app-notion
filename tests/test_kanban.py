@@ -533,7 +533,11 @@ def test_create_card_dedupes_by_finding_key_and_bumps_occurrence():
     patch = [c for c in client.calls if c[1] == "/pages/page-1"][0][2]
     assert patch["properties"]["OccurrenceCount"] == {"number": 3}
     callout = [c for c in client.calls if c[1] == "/blocks/page-1/children"][0][2]
-    assert "🔁 Re-detectado" in callout["children"][0]["callout"]["rich_text"][0]["text"]["content"]
+    content = callout["children"][0]["callout"]["rich_text"][0]["text"]["content"]
+    assert "🔁 Re-detected on" in content and "(occurrence #3)" in content
+    # Regression guard: template copy must be English, never the retired
+    # pt-BR wording (localization:kanban-card-template-english).
+    assert "Re-detectado" not in content and "ocorrência" not in content
 
 
 def test_redetecting_a_done_card_reopens_it_as_a_regression():
@@ -545,6 +549,43 @@ def test_redetecting_a_done_card_reopens_it_as_a_regression():
     assert result["status"] == "Backlog"
     patch = [c for c in client.calls if c[1] == "/pages/page-1"][0][2]
     assert patch["properties"]["Status"] == {"select": {"name": "Backlog"}}
+    callout = [c for c in client.calls if c[1] == "/blocks/page-1/children"][0][2]
+    content = callout["children"][0]["callout"]["rich_text"][0]["text"]["content"]
+    assert "⚠ REGRESSION" in content and "REGRESSÃO" not in content
+
+
+def test_create_card_body_headings_are_english():
+    """Regression coverage for localization:kanban-card-template-english —
+    the fixed/generated headings a Kanban card body gets must be English,
+    not the retired pt-BR wording (e.g. '📋 Análise & Plano de Execução')."""
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", "/pages"): {"id": "new-1"},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": []},
+    })
+    board.create_card(title="x", input_text="do the thing", plan="the plan")
+    page = [c for c in client.calls if c[1] == "/pages"][0][2]
+    headings = [
+        "".join(t["text"]["content"] for t in b["heading_2"]["rich_text"])
+        for b in page["children"] if b.get("type") == "heading_2"
+    ]
+    assert "🎯 Instructions for the Executor" in headings
+    assert "📋 Analysis & Execution Plan" in headings
+    assert not any("Instruções" in h or "Análise" in h or "Execução" in h for h in headings)
+
+
+def test_bump_existing_plan_heading_is_english():
+    board, client = _board({
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [_page(occ=1)]},
+    })
+    board.create_card(title="same finding", finding_key="resilience:x", plan="updated plan")
+    callout = [c for c in client.calls if c[1] == "/blocks/page-1/children"][0][2]
+    headings = [
+        "".join(t["text"]["content"] for t in b["heading_2"]["rich_text"])
+        for b in callout["children"] if b.get("type") == "heading_2"
+    ]
+    assert any(h.startswith("📋 Plan — ") for h in headings)
+    assert not any("Plano" in h for h in headings)
 
 
 def test_archived_cards_are_never_reopened():
@@ -580,6 +621,23 @@ def test_the_agents_platform_tools_are_not_advertised():
     listed = {t["name"] for t in http_handler.TOOLS_SCHEMA}
     assert listed.isdisjoint({"invoke_kanban_agent", "run_ready_cards"})
     assert {"attach_kanban_file", "attach_kanban_presentation"} <= listed
+
+
+def test_create_kanban_task_priority_enum_and_default_are_english():
+    """localization:kanban-card-template-english — the tool schema a caller
+    sees, and the default applied when priority is omitted, must be English
+    (board option names), not the retired pt-BR enum/default."""
+    schema = next(t for t in http_handler.TOOLS_SCHEMA if t["name"] == "create_kanban_task")
+    assert schema["inputSchema"]["properties"]["priority"]["enum"] == ["High", "Medium", "Low"]
+
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", "/pages"): {"id": "new-1"},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": []},
+    })
+    http_handler._h_create(board, {"title": "x"})
+    props = [c for c in client.calls if c[1] == "/pages"][0][2]["properties"]
+    assert props["Priority"] == {"select": {"name": "Medium"}}
 
 
 def test_page_id_falls_back_to_the_gateway_injected_context():

@@ -827,7 +827,12 @@ def run_sync(client: NotionClient, root_page_id: str, board=None, *,
 
     if rebuild and changed:
         result["kb_rebuild"] = _rebuild_kb()
-        log.append("KB index rebuilt" if result["kb_rebuild"]["ok"]
+        # astroid infers this key's type from the dict literal's init value
+        # (None, :805) rather than this reassignment one line above — a
+        # false positive, same astroid-inference class as E1101 (see
+        # docs/standards/pipeline-testing.md §5.2). Verified by reading the
+        # code: result["kb_rebuild"] is always _rebuild_kb()'s dict here.
+        log.append("KB index rebuilt" if result["kb_rebuild"]["ok"]  # pylint: disable=unsubscriptable-object
                    else f"warn: KB rebuild failed — {result['kb_rebuild'].get('error')}")
 
     result["log"] = log

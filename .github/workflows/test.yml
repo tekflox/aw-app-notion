@@ -61,9 +61,14 @@ jobs:
       - name: Test suite + coverage gate
         # fail_under is read from pyproject.toml's [tool.coverage.report] —
         # a one-way ratchet, see docs/standards/pipeline-testing.md §4.2.
+        # --cov-fail-under repeats that same number explicitly on the CLI:
+        # pytest-cov already enforces [tool.coverage.report] fail_under on
+        # its own (verified locally — a below-threshold run exits non-zero
+        # with no extra flag), but the explicit flag removes any doubt for
+        # a reader who hasn't verified that themselves.
         run: |
           python3 -m pytest --cov=notion_app --cov-report=term-missing \
-            --cov-report=html --cov-report=xml tests/ -q
+            --cov-report=html --cov-report=xml --cov-fail-under=82 tests/ -q
 
       - name: Upload coverage report artifact
         if: always()

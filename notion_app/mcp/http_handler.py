@@ -91,6 +91,7 @@ TOOLS_SCHEMA: list[dict] = [
             "properties": {
                 "status": {"type": "string", "description": "Logical status key or Notion option name. Omit for all statuses."},
                 "source": {"type": "string", "description": "Filter by the Source property, e.g. 'system-analyst'."},
+                "plan_slug": {"type": "string", "description": "Filter by the PlanSlug property — an AP-MT Plan's slug, verbatim."},
                 "limit": {"type": "integer", "default": 25, "description": "Max cards to return (1-100)."},
                 "order": {"type": "string", "enum": ["created", "edited"], "default": "created",
                           "description": "Sort by creation time (default) or last edit."},
@@ -138,6 +139,7 @@ TOOLS_SCHEMA: list[dict] = [
                 "priority": {"type": "string", "enum": ["High", "Medium", "Low"], "description": "Finding priority."},
                 "agent_slug": {"type": "string", "description": "Executor agent slug (e.g. 'coder-sonnet', 'doc-writer', 'debugger')."},
                 "target_slug": {"type": "string", "description": "agents-platform target slug. Recorded on the card only — not validated, since this app doesn't talk to agents-platform."},
+                "plan_slug": {"type": "string", "description": "AP-MT Plan slug, verbatim, when this card is created on a Plan's behalf. Recorded on the card only — not validated, same as target_slug."},
                 "input_text": {"type": "string", "description": "Task instructions for the executor, written into the card body. Be specific about what to fix and where."},
                 "check_hint": {"type": "string", "description": "Bash one-liner that exits 0 if the issue is gone."},
                 "description": {"type": "string", "description": "Short summary (≤200 chars) rendered as a callout at the top of the card."},
@@ -380,6 +382,7 @@ TOOLS_SCHEMA: list[dict] = [
 def _h_list(board: KanbanBoard, args: dict) -> dict:
     return board.list_cards(
         status=args.get("status") or "", source=args.get("source") or "",
+        plan_slug=args.get("plan_slug") or "",
         limit=args.get("limit") or 25, order=args.get("order") or "created")
 
 
@@ -395,7 +398,8 @@ def _h_create(board: KanbanBoard, args: dict) -> dict:
     return board.create_card(
         title=args.get("title") or "", finding_key=args.get("finding_key") or "",
         priority=args.get("priority") or "Medium", agent_slug=args.get("agent_slug") or "",
-        target_slug=args.get("target_slug") or "", input_text=args.get("input_text") or "",
+        target_slug=args.get("target_slug") or "", plan_slug=args.get("plan_slug") or "",
+        input_text=args.get("input_text") or "",
         check_hint=args.get("check_hint") or "", description=args.get("description") or "",
         plan=args.get("plan") or "", source=args.get("source") or "",
         tags=args.get("tags") or [])

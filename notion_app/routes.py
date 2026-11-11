@@ -198,10 +198,10 @@ def build_routes(ctx) -> FastAPI:
     # ------------------------------------------------------------------
 
     @app.get("/kanban/cards")
-    async def kanban_cards(status: str = "", source: str = "", limit: int = 25,
-                           order: str = "created"):
+    async def kanban_cards(status: str = "", source: str = "", plan_slug: str = "",
+                           limit: int = 25, order: str = "created"):
         return _kanban(board.list_cards, status=status, source=source,
-                       limit=limit, order=order)
+                       plan_slug=plan_slug, limit=limit, order=order)
 
     @app.get("/kanban/cards/{page_id}")
     async def kanban_card(page_id: str, include_body: bool = False,
@@ -213,7 +213,7 @@ def build_routes(ctx) -> FastAPI:
     async def kanban_create(data: dict = Body(...)):
         return _kanban(board.create_card, **{
             k: data.get(k) for k in (
-                "title", "finding_key", "priority", "agent_slug", "target_slug",
+                "title", "finding_key", "priority", "agent_slug", "target_slug", "plan_slug",
                 "input_text", "check_hint", "description", "plan", "source", "tags")
             if data.get(k) is not None
         })

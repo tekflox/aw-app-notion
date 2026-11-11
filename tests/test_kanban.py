@@ -39,6 +39,7 @@ SCHEMA = {
     "Source": {"type": "rich_text"},
     "FindingKey": {"type": "rich_text"},
     "TargetSlug": {"type": "rich_text"},
+    "PlanSlug": {"type": "rich_text"},
     "AgentSlug": {"type": "select"},
     "CheckHint": {"type": "rich_text"},
     "OccurrenceCount": {"type": "number"},
@@ -237,6 +238,16 @@ def test_list_cards_maps_logical_status_to_the_notion_option():
     assert query["filter"] == {"property": "Status", "select": {"equals": "Need Human"}}
 
 
+def test_list_cards_filters_by_plan_slug():
+    board, client = _board({("POST", f"/databases/{DB_ID}/query"): {"results": []}})
+    board.list_cards(plan_slug="apmt-plan-umbrella-orchestration")
+    query = [c for c in client.calls if c[0] == "POST"][0][2]
+    assert query["filter"] == {
+        "property": "PlanSlug",
+        "rich_text": {"equals": "apmt-plan-umbrella-orchestration"},
+    }
+
+
 def test_list_cards_page_size_is_clamped_to_notions_limit():
     board, client = _board({("POST", f"/databases/{DB_ID}/query"): {"results": []}})
     board.list_cards(limit=5000)
@@ -407,6 +418,40 @@ def test_create_card_maps_ptbr_priority_labels():
     board.create_card(title="x", priority="Alta")
     props = [c for c in client.calls if c[1] == "/pages"][0][2]["properties"]
     assert props["Priority"] == {"select": {"name": "High"}}
+
+
+def test_create_card_writes_plan_slug_and_summary_exposes_it():
+    """PlanSlug is the same shape as TargetSlug — a Plan's slug, verbatim,
+    recorded on the card for part 3 of the epic (the PlanDetail cards table
+    in AP-MT) to read back via get_kanban_card."""
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", "/pages"): {"id": "new-1", "url": "https://notion.so/new-1"},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": []},
+        ("GET", "/pages/new-1"): _page(page_id="new-1"),
+    })
+    result = board.create_card(title="x", plan_slug="apmt-plan-umbrella-orchestration")
+    props = [c for c in client.calls if c[1] == "/pages"][0][2]["properties"]
+    assert props["PlanSlug"] == {"rich_text": [{"text": {"content": "apmt-plan-umbrella-orchestration"}}]}
+    assert result["ok"] is True
+
+    page = _page(page_id="new-1")
+    page["properties"]["PlanSlug"] = {
+        "type": "rich_text",
+        "rich_text": [{"plain_text": "apmt-plan-umbrella-orchestration"}],
+    }
+    assert board._summarise(page)["plan_slug"] == "apmt-plan-umbrella-orchestration"
+
+
+def test_create_card_omits_plan_slug_when_empty():
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", "/pages"): {"id": "new-1"},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": []},
+    })
+    board.create_card(title="x")
+    props = [c for c in client.calls if c[1] == "/pages"][0][2]["properties"]
+    assert "PlanSlug" not in props
 
 
 # ── check_hint false-green gate (tooling:checkhint-false-green-on-missing-target) ──
@@ -638,6 +683,27 @@ def test_create_kanban_task_priority_enum_and_default_are_english():
     http_handler._h_create(board, {"title": "x"})
     props = [c for c in client.calls if c[1] == "/pages"][0][2]["properties"]
     assert props["Priority"] == {"select": {"name": "Medium"}}
+
+
+def test_h_create_plumbs_plan_slug_through_to_the_board():
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", "/pages"): {"id": "new-1"},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": []},
+    })
+    http_handler._h_create(board, {"title": "x", "plan_slug": "apmt-plan-umbrella-orchestration"})
+    props = [c for c in client.calls if c[1] == "/pages"][0][2]["properties"]
+    assert props["PlanSlug"] == {"rich_text": [{"text": {"content": "apmt-plan-umbrella-orchestration"}}]}
+
+
+def test_h_list_plumbs_plan_slug_through_to_the_board():
+    board, client = _board({("POST", f"/databases/{DB_ID}/query"): {"results": []}})
+    http_handler._h_list(board, {"plan_slug": "apmt-plan-umbrella-orchestration"})
+    query = [c for c in client.calls if c[0] == "POST"][0][2]
+    assert query["filter"] == {
+        "property": "PlanSlug",
+        "rich_text": {"equals": "apmt-plan-umbrella-orchestration"},
+    }
 
 
 def test_page_id_falls_back_to_the_gateway_injected_context():

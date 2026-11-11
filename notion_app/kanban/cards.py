@@ -87,8 +87,8 @@ class KanbanBoard:
         return db_id
 
     # ── read ────────────────────────────────────────────────────────────
-    def list_cards(self, *, status: str = "", source: str = "", limit: int = 25,
-                   order: str = "created") -> dict:
+    def list_cards(self, *, status: str = "", source: str = "", plan_slug: str = "",
+                   limit: int = 25, order: str = "created") -> dict:
         """Query the board. ``status`` is a logical key or a raw Notion option
         name; omit it for every card regardless of status.
 
@@ -114,6 +114,8 @@ class KanbanBoard:
                             prop_type: {"equals": self.config.notion_status(status)}})
         if source:
             filters.append({"property": "Source", "rich_text": {"equals": source}})
+        if plan_slug:
+            filters.append({"property": "PlanSlug", "rich_text": {"equals": plan_slug}})
         if len(filters) == 1:
             body["filter"] = filters[0]
         elif filters:
@@ -146,6 +148,7 @@ class KanbanBoard:
             # undispatchable one to anything reading this shape.
             "workflow_slug": val("WorkflowSlug"),
             "target_slug": val("TargetSlug"),
+            "plan_slug": val("PlanSlug"),
             "finding_key": val("FindingKey"),
             "tags": val("Tags"),
             "occurrence_count": val("OccurrenceCount"),
@@ -443,9 +446,9 @@ class KanbanBoard:
 
     # ── create ──────────────────────────────────────────────────────────
     def create_card(self, *, title: str, finding_key: str = "", priority: str = "Medium",
-                    agent_slug: str = "", target_slug: str = "", input_text: str = "",
-                    check_hint: str = "", description: str = "", plan: str = "",
-                    source: str = "", tags: list[str] | None = None) -> dict:
+                    agent_slug: str = "", target_slug: str = "", plan_slug: str = "",
+                    input_text: str = "", check_hint: str = "", description: str = "",
+                    plan: str = "", source: str = "", tags: list[str] | None = None) -> dict:
         """Create a card, or bump the existing one with the same
         ``finding_key`` (dedup + occurrence counting + regression detection,
         all ported from the monolith's ``create_task_endpoint``).
@@ -490,6 +493,7 @@ class KanbanBoard:
             "Priority": _PRIORITY_MAP.get(priority, "Medium"),
             "Source": source or "",
             "TargetSlug": target_slug or "",
+            "PlanSlug": plan_slug or "",
             "AgentSlug": agent_slug or "",
             "FindingKey": finding_key or "",
             "CheckHint": (check_hint or "")[:500],

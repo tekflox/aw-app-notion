@@ -238,6 +238,24 @@ def build_routes(ctx) -> FastAPI:
         return _kanban(board.set_property, data.get("page_id") or "",
                        data.get("property") or "", data.get("value"))
 
+    @app.get("/kanban/cards-need-attention")
+    async def kanban_cards_need_attention(limit: int = 10):
+        """Sync wrapper over the same ``list_cards_need_attention`` the
+        ``list_kanban_cards_need_attention`` MCP tool calls (_h_need_attention
+        in mcp/http_handler.py) — for the kanban-sweep dag Workflow's
+        synchronous http node to gate on, rather than requiring an MCP
+        client. ``_kanban`` turns an unconfigured board's NotionError(503)
+        into a real non-2xx, so the gate can tell "no work" from "broken"."""
+        def _run(limit: int) -> dict:
+            result = board.list_cards_need_attention(limit=limit)
+            return {
+                "has_work": result["count"] > 0,
+                "cards": result["cards"],
+                "counts": {"count": result["count"], "scanned": result["scanned"],
+                          "truncated": result["truncated"]},
+            }
+        return _kanban(_run, limit)
+
     # ------------------------------------------------------------------
     # Notion → knowledge base sync (the monolith's ``./aw notion-sync``).
     # The CLI command in commands/notion_sync.py is a thin client over

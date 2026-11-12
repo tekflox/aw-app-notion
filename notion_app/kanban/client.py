@@ -343,6 +343,7 @@ def build_property_payload(prop_type: str, value: Any) -> dict:
             "number": {"number": None},
             "date": {"date": None},
             "url": {"url": None},
+            "relation": {"relation": []},
         }.get(prop_type, {prop_type: None})
     if prop_type == "checkbox":
         return {"checkbox": bool(value)}
@@ -366,6 +367,9 @@ def build_property_payload(prop_type: str, value: Any) -> dict:
         return {"url": str(value)}
     if prop_type == "title":
         return {"title": [{"text": {"content": str(value)[:RICH_TEXT_LIMIT]}}]}
+    if prop_type == "relation":
+        ids = value if isinstance(value, list) else [value]
+        return {"relation": [{"id": i} for i in ids]}
     raise ValueError(f"unsupported property type '{prop_type}'")
 
 
@@ -392,6 +396,11 @@ def extract_property_value(prop: dict) -> Any:
         return prop.get("url")
     if ptype == "people":
         return [p.get("name") or p.get("id") for p in prop.get("people", [])]
+    if ptype == "relation":
+        # Page objects truncate a relation at 25 items (has_more=true) —
+        # enumerating a big epic's children needs the property-item
+        # endpoint's own pagination, not this cheap read.
+        return [r.get("id") for r in prop.get("relation", [])]
     if ptype in ("created_time", "last_edited_time"):
         return prop.get(ptype)
     return None

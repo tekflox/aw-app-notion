@@ -372,6 +372,10 @@ class KanbanBoard:
             "plan_slug": val("PlanSlug"),
             "finding_key": val("FindingKey"),
             "tags": val("Tags"),
+            # ParentCard is a relation (list-typed) even though the write
+            # seam enforces single-parent — take the first id, or None.
+            "parent_card": (val("ParentCard") or [None])[0],
+            "child_cards": val("ChildCards"),
             "occurrence_count": val("OccurrenceCount"),
             "created_time": page.get("created_time"),
             "last_edited_time": page.get("last_edited_time"),
@@ -685,10 +689,17 @@ class KanbanBoard:
     def create_card(self, *, title: str, finding_key: str = "", priority: str = "Medium",
                     agent_slug: str = "", target_slug: str = "", plan_slug: str = "",
                     input_text: str = "", check_hint: str = "", description: str = "",
-                    plan: str = "", source: str = "", tags: list[str] | None = None) -> dict:
+                    plan: str = "", source: str = "", tags: list[str] | None = None,
+                    parent_card: str = "") -> dict:
         """Create a card, or bump the existing one with the same
         ``finding_key`` (dedup + occurrence counting + regression detection,
         all ported from the monolith's ``create_task_endpoint``).
+
+        ``parent_card`` links this card to its parent via the native
+        ParentCard<->ChildCards Notion Relation — a no-op when empty, or
+        when the board lacks the property. The dedup bump path below does
+        NOT re-parent a re-detected finding; it keeps its original parent
+        even if a later create passes a different one.
 
         Unlike the monolith this never validates ``target_slug`` against
         agents-platform and never dispatches a run — see the module docstring.
@@ -737,6 +748,7 @@ class KanbanBoard:
             "OccurrenceCount": 1,
             "LastSeenAt": today,
             "Tags": tags[:5] if tags else None,
+            "ParentCard": parent_card or "",
         }
         for name, value in optional.items():
             if name not in schema or value in ("", None, []):

@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from notion_app.kanban import cards as cards_mod  # noqa: E402
 from notion_app.kanban.cards import KanbanBoard  # noqa: E402
 from notion_app.kanban.client import (  # noqa: E402
     NotionError,
@@ -73,7 +75,8 @@ def _page(page_id="page-1", title="A card", status="Backlog", occ=1):
 
 
 def _need_attention_page(page_id, *, priority="High", status="In Progress",
-                         created="2026-11-10T10:00:00.000Z", last_swept_at=None):
+                         created="2026-11-10T10:00:00.000Z", last_swept_at=None,
+                         last_human_ping_at=None, human_ping_count=None):
     props: dict = {
         "Name": {"type": "title", "title": [{"plain_text": page_id}]},
         "Status": {"type": "select", "select": {"name": status}},
@@ -81,6 +84,10 @@ def _need_attention_page(page_id, *, priority="High", status="In Progress",
     }
     if last_swept_at is not None:
         props["LastSweptAt"] = {"type": "date", "date": {"start": last_swept_at}}
+    if last_human_ping_at is not None:
+        props["LastHumanPingAt"] = {"type": "date", "date": {"start": last_human_ping_at}}
+    if human_ping_count is not None:
+        props["HumanPingCount"] = {"type": "number", "number": human_ping_count}
     return {
         "id": page_id,
         "url": f"https://notion.so/{page_id}",
@@ -88,6 +95,18 @@ def _need_attention_page(page_id, *, priority="High", status="In Progress",
         "last_edited_time": created,
         "properties": props,
     }
+
+
+# Board schema that DOES declare the reping-tracking properties — used by
+# every reping=True test except the one proving schema-absence degrades
+# cleanly (SCHEMA itself deliberately lacks them, same as production boards
+# that haven't had the one-time manual schema add yet).
+SCHEMA_WITH_REPING = {**SCHEMA, "LastHumanPingAt": {"type": "date"},
+                      "HumanPingCount": {"type": "number"}}
+
+
+def _ago_iso(hours=0, minutes=0):
+    return (datetime.now(timezone.utc) - timedelta(hours=hours, minutes=minutes)).isoformat()
 
 
 class FakeClient:
@@ -392,6 +411,291 @@ def test_need_attention_card_shape_adds_last_swept_at_without_touching_summarise
     assert card["title"] == "p1"
     assert card["status"] == "In Progress"
     assert card["priority"] == "High"
+
+
+# ── need-attention: reping ─────────────────────────────────────────────
+#
+# (a) default-args/no-side-effects contract for reping=False is covered by
+#     every test above this block — none of them pass reping, and none of
+#     them exercise apmt or issue a PATCH, which is exactly what's pinned.
+
+def test_reping_false_is_byte_identical_pure_read():
+    page = _need_attention_page("p1", status="Need Human")
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
+    })
+    result = board.list_cards_need_attention()
+    assert "re_pinged" not in result
+    assert "reping" not in result
+    assert not any(c[0] in ("PATCH",) for c in client.calls)
+
+
+def test_need_attention_cards_always_carry_ping_fields_regardless_of_reping():
+    page = _need_attention_page("p1", last_human_ping_at="2026-11-10T00:00:00+00:00",
+                                human_ping_count=2)
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
+    })
+    card = board.list_cards_need_attention()["cards"][0]
+    assert card["last_human_ping_at"] == "2026-11-10T00:00:00+00:00"
+    assert card["human_ping_count"] == 2
+
+
+def test_reping_boundary_is_greater_or_equal_not_strictly_greater(monkeypatch):
+    """11h59m old -> not due, EXACTLY 12h00m old -> due, unset -> due. The
+    caller ticks every 6h; a strict `>` would turn the effective period into
+    18h. ``_now_utc`` is pinned so the exact-12h case can't be rescued by
+    real wall-clock drift between building the fixture and the method
+    running — a `>` mutation on this guard must fail this test."""
+    fixed_now = datetime(2026, 11, 12, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(cards_mod, "_now_utc", lambda: fixed_now)
+
+    not_due = _need_attention_page(
+        "not-due", status="Need Human",
+        last_human_ping_at=(fixed_now - timedelta(hours=11, minutes=59)).isoformat())
+    due = _need_attention_page(
+        "due", status="Need Human",
+        last_human_ping_at=(fixed_now - timedelta(hours=12)).isoformat())
+    unset = _need_attention_page("unset", status="Need Human")
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {
+            "results": [not_due, due, unset], "has_more": False},
+    })
+    monkeypatch.setattr(cards_mod.apmt, "send_sysadmin_report",
+                        lambda title, text: {"ok": True, "sent": 1})
+
+    result = board.list_cards_need_attention(reping=True)
+    assert result["reping"]["due"] == 2
+    pinged_ids = {c["page_id"] for c in result["re_pinged"]}
+    assert pinged_ids == {"due", "unset"}
+
+
+def test_reping_send_failure_writes_nothing(monkeypatch):
+    page = _need_attention_page("p1", status="Need Human")
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
+    })
+
+    def _boom(title, text):
+        raise cards_mod.apmt.ApmtSyncError("agents-platform-runners refused the call (502)")
+    monkeypatch.setattr(cards_mod.apmt, "send_sysadmin_report", _boom)
+
+    result = board.list_cards_need_attention(reping=True)
+    assert result["reping"]["send_ok"] is False
+    assert result["reping"]["pinged"] == 0
+    assert result["re_pinged"] == []
+    assert not any(c[0] == "PATCH" for c in client.calls)
+
+
+def test_reping_not_configured_is_skipped_not_an_error(monkeypatch):
+    page = _need_attention_page("p1", status="Need Human")
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
+    })
+
+    def _not_configured(title, text):
+        raise cards_mod.apmt.ApmtNotConfigured("agents-platform-runners is not installed")
+    monkeypatch.setattr(cards_mod.apmt, "send_sysadmin_report", _not_configured)
+
+    result = board.list_cards_need_attention(reping=True)
+    assert "skipped" in result["reping"]
+    assert result["reping"]["send_ok"] is False
+    assert not any(c[0] == "PATCH" for c in client.calls)
+
+
+def test_reping_true_with_nothing_due_sends_nothing(monkeypatch):
+    page = _need_attention_page("p1", status="Need Human",
+                                last_human_ping_at=_ago_iso(hours=1))
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
+    })
+    called = []
+    monkeypatch.setattr(cards_mod.apmt, "send_sysadmin_report",
+                        lambda title, text: called.append(1) or {"ok": True})
+
+    result = board.list_cards_need_attention(reping=True)
+    assert result["reping"] == {"due": 0, "pinged": 0, "send_ok": True, "write_failed": []}
+    assert result["re_pinged"] == []
+    assert called == []
+
+
+def test_reping_relay_answering_ok_false_without_raising_writes_nothing(monkeypatch):
+    """apmt.send_sysadmin_report can return a body instead of raising — AP-MT's
+    report_notify answers {"ok": sent > 0, ...} even on a 200, so an all-failed
+    chunked send must be read from the body, not inferred from "it didn't throw"."""
+    page = _need_attention_page("p1", status="Need Human")
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
+    })
+    monkeypatch.setattr(cards_mod.apmt, "send_sysadmin_report",
+                        lambda title, text: {"ok": False, "sent": 0, "failed": 1})
+
+    result = board.list_cards_need_attention(reping=True)
+    assert result["reping"]["send_ok"] is False
+    assert "error" in result["reping"]
+    assert not any(c[0] == "PATCH" for c in client.calls)
+
+
+def test_reping_a_failed_per_card_write_is_listed_but_does_not_abort_the_batch(monkeypatch):
+    ok_page = _need_attention_page("ok", status="Need Human")
+    fails_page = _need_attention_page("fails", status="Need Human")
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [ok_page, fails_page], "has_more": False},
+    })
+    monkeypatch.setattr(cards_mod.apmt, "send_sysadmin_report",
+                        lambda title, text: {"ok": True, "sent": 1})
+
+    real_patch_page = board.client.patch_page
+    def _patch_page(page_id, properties):
+        if page_id == "fails":
+            raise cards_mod.NotionError(409, "conflict")
+        return real_patch_page(page_id, properties)
+    monkeypatch.setattr(board.client, "patch_page", _patch_page)
+
+    result = board.list_cards_need_attention(reping=True)
+    assert result["reping"]["pinged"] == 1
+    assert [w["page_id"] for w in result["reping"]["write_failed"]] == ["fails"]
+    assert {c["page_id"] for c in result["re_pinged"]} == {"ok"}
+
+
+def test_reping_send_success_writes_both_properties_incrementing_the_count(monkeypatch):
+    page = _need_attention_page("p1", status="Need Human", human_ping_count=2)
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
+    })
+    sent: list = []
+    monkeypatch.setattr(cards_mod.apmt, "send_sysadmin_report",
+                        lambda title, text: (sent.append((title, text)), {"ok": True, "sent": 1})[1])
+
+    result = board.list_cards_need_attention(reping=True)
+    assert result["reping"]["send_ok"] is True
+    assert result["reping"]["pinged"] == 1
+    assert result["re_pinged"] == [{"page_id": "p1", "title": "p1", "ping_count": 3}]
+
+    patches = [c for c in client.calls if c[0] == "PATCH" and c[1] == "/pages/p1"]
+    assert len(patches) == 2
+    written = {k: v for p in patches for k, v in p[2]["properties"].items()}
+    assert written["HumanPingCount"] == {"number": 3.0}
+    assert "LastHumanPingAt" in written
+    assert len(sent) == 1  # one batched send, not one per property write
+
+
+def test_reping_pings_a_due_card_below_the_top_limit_cut(monkeypatch):
+    """A low-priority card that doesn't make the top-`limit` cut must still
+    be in the due set — reping scope is the full scanned set, not `cards`."""
+    high = _need_attention_page("high", priority="High", status="Need Human",
+                                created="2026-11-12T09:00:00.000Z")
+    low = _need_attention_page("low", priority="Low", status="Need Human",
+                               created="2026-11-10T09:00:00.000Z")
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [high, low], "has_more": False},
+    })
+    monkeypatch.setattr(cards_mod.apmt, "send_sysadmin_report",
+                        lambda title, text: {"ok": True, "sent": 1})
+
+    result = board.list_cards_need_attention(limit=1, reping=True)
+    assert len(result["cards"]) == 1
+    assert result["cards"][0]["page_id"] == "high"  # "low" didn't make the cut...
+    assert result["reping"]["due"] == 2  # ...but both were still due
+    assert {c["page_id"] for c in result["re_pinged"]} == {"high", "low"}
+
+
+def test_reping_missing_board_schema_skips_the_whole_branch_without_crashing(monkeypatch):
+    page = _need_attention_page("p1", status="Need Human")
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},  # no LastHumanPingAt/HumanPingCount
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
+    })
+    called = []
+    monkeypatch.setattr(cards_mod.apmt, "send_sysadmin_report",
+                        lambda title, text: called.append(1) or {"ok": True})
+
+    result = board.list_cards_need_attention(reping=True)
+    assert result["reping"] == {"due": 1, "pinged": 0, "send_ok": False, "write_failed": [],
+                                "skipped": "LastHumanPingAt/HumanPingCount not in board schema"}
+    assert result["re_pinged"] == []
+    assert called == []  # never even tried to send
+    assert not any(c[0] == "PATCH" for c in client.calls)
+
+
+def test_reping_one_batched_send_for_n_due_cards_not_n_sends(monkeypatch):
+    pages = [_need_attention_page(f"p{i}", status="Need Human") for i in range(5)]
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": pages, "has_more": False},
+    })
+    sent: list = []
+    monkeypatch.setattr(cards_mod.apmt, "send_sysadmin_report",
+                        lambda title, text: (sent.append(title), {"ok": True, "sent": 1})[1])
+
+    result = board.list_cards_need_attention(limit=25, reping=True)
+    assert len(sent) == 1
+    assert sent[0] == "⏰ 5 card(s) still waiting on you"
+    assert result["reping"]["pinged"] == 5
+
+
+def test_reping_caps_the_due_batch_at_20_and_flags_truncated(monkeypatch):
+    pages = [_need_attention_page(f"p{i}", status="Need Human") for i in range(25)]
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": pages, "has_more": False},
+    })
+    monkeypatch.setattr(cards_mod.apmt, "send_sysadmin_report",
+                        lambda title, text: {"ok": True, "sent": 1})
+
+    result = board.list_cards_need_attention(limit=25, reping=True)
+    assert result["reping"]["due"] == 25
+    assert result["reping"]["pinged"] == 20
+    assert result["reping"]["reping_truncated"] is True
+
+
+def test_reping_never_touches_last_swept_at_or_sweep_block(monkeypatch):
+    page = _need_attention_page("p1", status="Need Human", last_swept_at="2026-11-01")
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
+    })
+    monkeypatch.setattr(cards_mod.apmt, "send_sysadmin_report",
+                        lambda title, text: {"ok": True, "sent": 1})
+
+    board.list_cards_need_attention(reping=True)
+    patches = [c for c in client.calls if c[0] == "PATCH" and c[1] == "/pages/p1"]
+    written_props = {k for p in patches for k in p[2]["properties"]}
+    assert "LastSweptAt" not in written_props
+    assert "SweepBlock" not in written_props
+
+
+def test_h_need_attention_coerces_a_stringified_false_reping_flag(monkeypatch):
+    """coerce_transport_value gotcha: some MCP transports stringify a
+    schemaless bool, and a bare `bool("false")` is True."""
+    page = _need_attention_page("p1", status="Need Human")
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
+    })
+    called = []
+    monkeypatch.setattr(cards_mod.apmt, "send_sysadmin_report",
+                        lambda title, text: called.append(1) or {"ok": True, "sent": 1})
+
+    result = http_handler._h_need_attention(board, {"reping": "false"})
+    assert "reping" not in result
+    assert called == []
+
+
+def test_mcp_need_attention_schema_advertises_reping():
+    spec = next(t for t in http_handler.TOOLS_SCHEMA if t["name"] == "list_kanban_cards_need_attention")
+    assert spec["inputSchema"]["properties"]["reping"]["type"] == "boolean"
+    assert spec["inputSchema"]["properties"]["reping"]["default"] is False
 
 
 # ── board writes ────────────────────────────────────────────────────────

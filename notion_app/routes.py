@@ -240,13 +240,19 @@ def build_routes(ctx) -> FastAPI:
                        data.get("property") or "", data.get("value"))
 
     @app.get("/kanban/cards-need-attention")
-    async def kanban_cards_need_attention(limit: int = 10):
+    async def kanban_cards_need_attention(limit: int = 10, reping: bool = False):
         """Sync wrapper over the same ``list_cards_need_attention`` the
         ``list_kanban_cards_need_attention`` MCP tool calls (_h_need_attention
         in mcp/http_handler.py) — for the kanban-sweep dag Workflow's
         synchronous http node to gate on, rather than requiring an MCP
         client. ``_kanban`` turns an unconfigured board's NotionError(503)
         into a real non-2xx, so the gate can tell "no work" from "broken".
+
+        ``reping`` defaults to False — every existing caller (the dag
+        Workflow's gate node included) keeps today's pure-read behaviour.
+        See ``KanbanBoard.list_cards_need_attention`` for what True does
+        (Kanban feature:kanban-need-human-deterministic-reping); whether the
+        gate node itself opts in is a separate, not-yet-made decision.
 
         Run off the event loop via ``run_in_threadpool`` — this app is
         ``"tier": "inprocess"`` (shares the main server's single event loop),
@@ -257,15 +263,19 @@ def build_routes(ctx) -> FastAPI:
         (mcp/http_handler.py's ``handle_request``); this route has no such
         shared wrapper, and is polled periodically by the kanban-sweep dag
         Workflow's http node, so a stall here recurs on every poll."""
-        def _run(limit: int) -> dict:
-            result = board.list_cards_need_attention(limit=limit)
-            return {
+        def _run(limit: int, reping: bool) -> dict:
+            result = board.list_cards_need_attention(limit=limit, reping=reping)
+            out = {
                 "has_work": result["count"] > 0,
                 "cards": result["cards"],
                 "counts": {"count": result["count"], "scanned": result["scanned"],
                           "truncated": result["truncated"]},
             }
-        return await run_in_threadpool(_kanban, _run, limit)
+            if reping:
+                out["re_pinged"] = result["re_pinged"]
+                out["reping"] = result["reping"]
+            return out
+        return await run_in_threadpool(_kanban, _run, limit, reping)
 
     # ------------------------------------------------------------------
     # Notion → knowledge base sync (the monolith's ``./aw notion-sync``).

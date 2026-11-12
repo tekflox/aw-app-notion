@@ -32,7 +32,7 @@ from fastapi.concurrency import run_in_threadpool
 
 from ..kanban.cards import KanbanBoard
 from ..kanban.check_hint_preflight import preflight_check_hint
-from ..kanban.client import NotionError
+from ..kanban.client import NotionError, coerce_transport_value
 
 log = logging.getLogger("aw_apps.notion.kanban")
 
@@ -107,13 +107,23 @@ TOOLS_SCHEMA: list[dict] = [
             "created_time descending (newest first) → LastSweptAt ascending (never-swept "
             "cards first). No staleness filter and no run-check — call "
             "list_kanban_cards/get_kanban_card for anything beyond this merged ordering. "
-            "Returns {count, cards, scanned, truncated}; each card is the list_kanban_cards "
-            "summary shape plus last_swept_at."
+            "Returns {count, cards, scanned, truncated}; each card always carries "
+            "last_swept_at, last_human_ping_at and human_ping_count. "
+            "`reping` (default false, pure read): side effect — when true, sends a "
+            "Telegram reminder to the sysadmin for every Need Human card (in the full "
+            "scanned set, not just the returned cards) whose last human ping is unset or "
+            ">=12h old, then writes last_human_ping_at/human_ping_count on the cards "
+            "actually sent. Adds re_pinged and reping to the response."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "default": 10, "description": "Max cards to return (1-25)."},
+                "reping": {"type": "boolean", "default": False, "description": (
+                    "SIDE EFFECT when true: sends a Telegram reminder to the sysadmin for "
+                    "due Need Human cards and writes ping-tracking properties. Default "
+                    "false = pure read, no side effects."
+                )},
             },
         },
     },
@@ -406,7 +416,13 @@ def _h_list(board: KanbanBoard, args: dict) -> dict:
 
 
 def _h_need_attention(board: KanbanBoard, args: dict) -> dict:
-    return board.list_cards_need_attention(limit=args.get("limit") or 10)
+    # coerce_transport_value: some MCP transports stringify a schemaless bool
+    # arg, so a bare `bool(args.get("reping"))` would treat the literal
+    # string "false" as truthy — see client.py's own docstring for why this
+    # exists and set_property's use of the same guard.
+    return board.list_cards_need_attention(
+        limit=args.get("limit") or 10,
+        reping=bool(coerce_transport_value(args.get("reping"))))
 
 
 def _h_get_card(board: KanbanBoard, args: dict) -> dict:

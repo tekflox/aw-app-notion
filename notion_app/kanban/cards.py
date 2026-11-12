@@ -45,6 +45,7 @@ from .client import (
 )
 from .check_hint_lint import lint_check_hint
 from .config import KanbanConfig
+from .deploy_lint import lint_deploy_component, lint_deploy_to_version
 
 log = logging.getLogger("aw_apps.notion.kanban")
 
@@ -52,6 +53,14 @@ log = logging.getLogger("aw_apps.notion.kanban")
 _PRIORITY_MAP = {
     "Alta": "High", "Média": "Medium", "Media": "Medium", "Baixa": "Low",
     "High": "High", "Medium": "Medium", "Low": "Low",
+}
+
+# Write-time lint for the fields kanban_check_deployed's adapter registry
+# dispatches on — same reasoning as CheckHint's lint above, just scoped to
+# the Deploy* schema (architect decision, card 4165bf3b-9510-8162-89d0-dca46ba66481).
+_DEPLOY_LINTERS = {
+    "DeployComponent": lint_deploy_component,
+    "DeployToVersion": lint_deploy_to_version,
 }
 
 
@@ -304,6 +313,13 @@ class KanbanBoard:
                         "reasons": risks,
                         "hint": "rewrite so a missing/unreachable target fails closed (exit non-zero), "
                                 "not so it exits 0 by never actually checking"}
+        if property_name in _DEPLOY_LINTERS and isinstance(value, str) and value.strip():
+            risks = _DEPLOY_LINTERS[property_name](value)
+            if risks:
+                return {"ok": False,
+                        "error": f"{property_name} risks landing on kanban_check_deployed "
+                                 "as permanently invalid",
+                        "reasons": risks}
         db_id = self._require_db()
         schema = self.client.database_schema(db_id)
         spec = schema.get(property_name)

@@ -231,6 +231,33 @@ def test_cards_need_attention_matches_the_mcp_tool_for_the_same_fixture():
     assert route_body["counts"]["scanned"] == mcp_result["scanned"]
 
 
+def test_cards_need_attention_default_omits_reping_keys(monkeypatch):
+    """reping defaults to False — the response shape must stay exactly what
+    it was before reping existed, no new keys even present."""
+    with tempfile.TemporaryDirectory() as tmp:
+        client, _ctx = _configured_client(Path(tmp))
+        _patch_notion_api(monkeypatch, [_need_attention_page("p1")])
+
+        body = client.get("/kanban/cards-need-attention").json()
+        assert "re_pinged" not in body
+        assert "reping" not in body
+
+
+def test_cards_need_attention_reping_true_adds_the_new_keys(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        client, _ctx = _configured_client(Path(tmp))
+        _patch_notion_api(monkeypatch, [_need_attention_page("p1", status="Need Human")])
+        from notion_app.kanban import cards as cards_mod
+        monkeypatch.setattr(cards_mod.apmt, "send_sysadmin_report",
+                            lambda title, text: {"ok": True, "sent": 1})
+
+        body = client.get("/kanban/cards-need-attention", params={"reping": True}).json()
+        # NEED_ATTENTION_SCHEMA lacks LastHumanPingAt/HumanPingCount — same
+        # "never crash" defensive path cards.py's own test suite covers.
+        assert body["reping"]["skipped"] == "LastHumanPingAt/HumanPingCount not in board schema"
+        assert body["re_pinged"] == []
+
+
 def test_status_without_token():
     with tempfile.TemporaryDirectory() as tmp:
         client, _ctx = _client(Path(tmp))

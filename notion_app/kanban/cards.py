@@ -46,6 +46,7 @@ from .client import (
 from .check_hint_lint import lint_check_hint
 from .config import KanbanConfig
 from .deploy_lint import lint_deploy_component, lint_deploy_to_version
+from .. import apmt
 
 log = logging.getLogger("aw_apps.notion.kanban")
 
@@ -66,6 +67,13 @@ _DEPLOY_LINTERS = {
 
 def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _now_utc() -> datetime:
+    """Seam over ``datetime.now`` — reping's 12h boundary check and its
+    write-time stamp both go through this one function, so a test can pin
+    "now" without fighting real wall-clock drift at an exact boundary."""
+    return datetime.now(timezone.utc)
 
 
 def _parse_instant(value: str | None) -> datetime | None:
@@ -163,7 +171,14 @@ class KanbanBoard:
     # a full board export is a different tool, this one is a bounded sweep feed.
     _NEED_ATTENTION_SCAN_CAP = 500
 
-    def list_cards_need_attention(self, *, limit: int = 10) -> dict:
+    # reping=True: a Need Human card is due again once its last human ping is
+    # this old (>=, not >) — the caller ticks every 6h, strict `>` would turn
+    # the effective period into 18h. Cap bounds one batched Telegram send and
+    # the write fan-out it triggers.
+    _REPING_DUE_AFTER_S = 12 * 3600
+    _REPING_CAP = 20
+
+    def list_cards_need_attention(self, *, limit: int = 10, reping: bool = False) -> dict:
         """Deterministic candidate list for the stale-card sweep: In Progress
         + Need Human cards, one merged ordered list, top ``limit`` (clamped
         1-25).
@@ -176,16 +191,28 @@ class KanbanBoard:
         No staleness filter and no run-check here — those stay agent-side
         (the Manager skill), same as the approved design on card 4115bf3b:
         this tool is pure deterministic Notion-property sorting.
+
+        ``reping`` defaults to False and every existing caller gets exactly
+        the read-only behaviour above — the side effect below is opt-in and
+        reported, never silent (Kanban feature:kanban-need-human-deterministic-
+        reping). When True: every Need Human card in the full scanned set
+        (not just the top-``limit`` returned here — a low-priority card below
+        the cut must still ping) whose LastHumanPingAt is unset or >=12h old
+        gets ONE batched Telegram reminder, and only cards in a confirmed-sent
+        batch get LastHumanPingAt/HumanPingCount written. Never touches
+        LastSweptAt, SweepBlock, or any other Manager marker — this is a
+        separate human-reminder channel.
         """
         limit = max(1, min(int(limit), 25))
         db_id = self._require_db()
         schema = self.client.database_schema(db_id)
         prop_name = status_property_name(schema)
         prop_type = schema.get(prop_name, {}).get("type", "select")
+        need_human_status = self.config.notion_status("need_human")
         body: dict[str, Any] = {
             "filter": {"or": [
                 {"property": prop_name, prop_type: {"equals": self.config.notion_status("running")}},
-                {"property": prop_name, prop_type: {"equals": self.config.notion_status("need_human")}},
+                {"property": prop_name, prop_type: {"equals": need_human_status}},
             ]},
             "page_size": 100,
         }
@@ -209,21 +236,108 @@ class KanbanBoard:
             cursor = result.get("next_cursor")
 
         cards = []
+        due: list[dict] = []
         for page in pages:
             props = page.get("properties", {})
             last_swept_at = (extract_property_value(props["LastSweptAt"])
                              if "LastSweptAt" in props else None)
+            last_human_ping_at = (extract_property_value(props["LastHumanPingAt"])
+                                  if "LastHumanPingAt" in props else None)
+            human_ping_count = (extract_property_value(props["HumanPingCount"])
+                                if "HumanPingCount" in props else None)
             card = self._summarise(page)
             card["last_swept_at"] = last_swept_at
+            card["last_human_ping_at"] = last_human_ping_at
+            card["human_ping_count"] = human_ping_count
             cards.append(card)
+            if card["status"] == need_human_status and self._reping_is_due(last_human_ping_at):
+                due.append(card)
 
         cards.sort(key=self._need_attention_sort_key)
-        return {
+        result = {
             "count": min(len(cards), limit),
             "cards": cards[:limit],
             "scanned": len(pages),
             "truncated": truncated,
         }
+        if reping:
+            reping_result, re_pinged = self._run_reping(due, schema)
+            result["re_pinged"] = re_pinged
+            result["reping"] = reping_result
+        return result
+
+    def _reping_is_due(self, last_human_ping_at: str | None) -> bool:
+        ping_instant = _parse_instant(last_human_ping_at)
+        if ping_instant is None:
+            return True
+        age_s = (_now_utc() - ping_instant).total_seconds()
+        return age_s >= self._REPING_DUE_AFTER_S
+
+    def _run_reping(self, due: list[dict], schema: dict) -> tuple[dict, list[dict]]:
+        """Send one batched Telegram reminder for ``due`` Need Human cards,
+        then — only once that send is confirmed — stamp LastHumanPingAt/
+        HumanPingCount on the cards actually sent. Never raises: every
+        failure mode (no schema, no apmt relay, a failed send, a failed
+        per-card write) degrades to a reported ``reping`` dict instead."""
+        if "LastHumanPingAt" not in schema or "HumanPingCount" not in schema:
+            return ({"due": len(due), "pinged": 0, "send_ok": False, "write_failed": [],
+                     "skipped": "LastHumanPingAt/HumanPingCount not in board schema"}, [])
+        if not due:
+            return ({"due": 0, "pinged": 0, "send_ok": True, "write_failed": []}, [])
+
+        reping_truncated = len(due) > self._REPING_CAP
+        batch = due[: self._REPING_CAP]
+        extra = {"reping_truncated": True} if reping_truncated else {}
+
+        lines = []
+        for card in batch:
+            count = (card.get("human_ping_count") or 0) + 1
+            edited = card.get("last_edited_time") or "unknown"
+            lines.append(f"• {card['title']} — {card['url']} "
+                         f"(ping #{count}, last edited {edited})")
+        title = f"⏰ {len(batch)} card(s) still waiting on you"
+
+        try:
+            sent = apmt.send_sysadmin_report(title, "\n".join(lines))
+        except apmt.ApmtNotConfigured as exc:
+            return ({"due": len(due), "pinged": 0, "send_ok": False, "write_failed": [],
+                     "skipped": str(exc), **extra}, [])
+        except apmt.ApmtSyncError as exc:
+            return ({"due": len(due), "pinged": 0, "send_ok": False, "write_failed": [],
+                     "error": str(exc), **extra}, [])
+
+        if not sent.get("ok"):
+            return ({"due": len(due), "pinged": 0, "send_ok": False, "write_failed": [],
+                     "error": f"telegram-report relay reported no send: {sent}", **extra}, [])
+
+        re_pinged: list[dict] = []
+        write_failed: list[dict] = []
+        now_iso = _now_utc().isoformat()
+        at_type = schema.get("LastHumanPingAt", {}).get("type", "date")
+        count_type = schema.get("HumanPingCount", {}).get("type", "number")
+        for card in batch:
+            count = (card.get("human_ping_count") or 0) + 1
+            # One PATCH carrying both properties, not two separate
+            # set_property calls: if LastHumanPingAt alone landed and
+            # HumanPingCount didn't, the next call would see a fresh
+            # LastHumanPingAt and treat the card as not-due for up to 12h —
+            # silently swallowing the very retry write_failed exists to
+            # signal (code review finding, PR #9).
+            try:
+                payload = {
+                    "LastHumanPingAt": build_property_payload(at_type, now_iso),
+                    "HumanPingCount": build_property_payload(count_type, count),
+                }
+                self.client.patch_page(card["page_id"], payload)
+            except (NotionError, ValueError) as exc:
+                log.warning("reping: write failed for %s: %s", card["page_id"], exc)
+                write_failed.append({"page_id": card["page_id"], "error": str(exc)})
+                continue
+            re_pinged.append({"page_id": card["page_id"], "title": card["title"],
+                              "ping_count": count})
+
+        return ({"due": len(due), "pinged": len(re_pinged), "send_ok": True,
+                 "write_failed": write_failed, **extra}, re_pinged)
 
     def _need_attention_sort_key(self, card: dict) -> tuple:
         priority_rank = self._PRIORITY_RANK.get(card.get("priority"), 3)

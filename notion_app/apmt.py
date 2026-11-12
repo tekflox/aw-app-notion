@@ -152,6 +152,16 @@ def _call(method: str, path: str, body: dict | None = None) -> dict:
         raise ApmtSyncError(f"{RUNNERS_APP_ID} returned a non-JSON body") from exc
 
 
+def send_sysadmin_report(title: str, text: str) -> dict:
+    """Relay a plain-text report to the runners app's ``/telegram-report``,
+    which forwards it to agents-platform-multitenant's sysadmin Telegram bot
+    (Kanban ``feature:kanban-need-human-deterministic-reping``). Same
+    ``ApmtNotConfigured``/``ApmtSyncError`` split as every other call through
+    ``_call`` — a caller that has no agents-platform to relay to sees that as
+    ``ApmtNotConfigured``, not a crash."""
+    return _call("POST", "/telegram-report", {"title": title, "text": text})
+
+
 def push_token(token: str, config: dict | None = None) -> dict:
     """Push the token and, when given, the Kanban board config
     (``{"kanban_database_id": ..., "kanban_statuses": {...}}`` — see

@@ -46,6 +46,13 @@ SCHEMA = {
     "LastSeenAt": {"type": "date"},
     "Tags": {"type": "multi_select"},
     "is_live": {"type": "checkbox"},
+    "DeployEnv": {"type": "select"},
+    "DeployComponent": {"type": "rich_text"},
+    "DeployWorkspaces": {"type": "multi_select"},
+    "DeployToVersion": {"type": "rich_text"},
+    "DeployFromVersion": {"type": "rich_text"},
+    "DeployCheckResult": {"type": "rich_text"},
+    "LastDeployCheckAt": {"type": "date"},
 }
 
 
@@ -688,6 +695,105 @@ def test_lint_clean_hint_has_no_risks():
     risks = lint_check_hint(
         'sed -n "1,50p" /opt/aw-workspace/src/apps/fetch.py | grep -q "os.replace"')
     assert risks == []
+
+
+# ── Deploy* lint (DeployComponent / DeployToVersion) ────────────────────────
+
+from notion_app.kanban.deploy_lint import (  # noqa: E402
+    lint_deploy_component,
+    lint_deploy_to_version,
+)
+
+
+def test_lint_deploy_component_accepts_the_four_known_shapes():
+    assert lint_deploy_component("app:notion") == []
+    assert lint_deploy_component("service:aw-backend") == []
+    assert lint_deploy_component("core") == []
+    assert lint_deploy_component("remote-host") == []
+
+
+def test_lint_deploy_component_rejects_unknown_class():
+    risks = lint_deploy_component("widget:foo")
+    assert any("doesn't match any known class" in r for r in risks)
+
+
+def test_lint_deploy_component_rejects_a_list():
+    risks = lint_deploy_component("app:notion, app:kanban")
+    assert any("only ONE component" in r for r in risks)
+
+
+def test_lint_deploy_component_rejects_empty():
+    assert lint_deploy_component("") != []
+    assert lint_deploy_component("   ") != []
+
+
+def test_lint_deploy_component_rejects_malformed_slug():
+    risks = lint_deploy_component("app:Not_A_Slug!")
+    assert any("slug" in r for r in risks)
+
+
+def test_lint_deploy_to_version_accepts_semver_and_sha():
+    assert lint_deploy_to_version("v0.35.0") == []
+    assert lint_deploy_to_version("0.35.0") == []
+    assert lint_deploy_to_version("fa4380bc12") == []
+
+
+def test_lint_deploy_to_version_rejects_placeholder():
+    risks = lint_deploy_to_version("latest")
+    assert any("placeholder" in r for r in risks)
+
+
+def test_lint_deploy_to_version_rejects_empty():
+    assert lint_deploy_to_version("") != []
+
+
+def test_lint_deploy_to_version_rejects_free_text():
+    risks = lint_deploy_to_version("release-candidate-7")
+    assert any("neither a semver tag" in r for r in risks)
+
+
+def test_set_property_rejects_a_malformed_deploy_component():
+    board, client = _board({("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA}})
+    result = board.set_property("page-1", "DeployComponent", "widget:foo")
+    assert result["ok"] is False
+    assert not [c for c in client.calls if c[0] == "PATCH"]
+
+
+def test_set_property_rejects_a_placeholder_deploy_to_version():
+    board, client = _board({("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA}})
+    result = board.set_property("page-1", "DeployToVersion", "TBD")
+    assert result["ok"] is False
+    assert not [c for c in client.calls if c[0] == "PATCH"]
+
+
+def test_set_property_accepts_a_well_formed_deploy_component_and_version():
+    board, client = _board({("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA}})
+    assert board.set_property("page-1", "DeployComponent", "app:notion")["ok"] is True
+    assert board.set_property("page-1", "DeployToVersion", "v0.35.1")["ok"] is True
+
+
+def test_set_property_rejects_an_empty_string_deploy_component_or_version():
+    """Regression: the lint used to only run when value.strip() was truthy,
+    so blanking a Deploy* field to "" (or whitespace) skipped the linter
+    entirely and wrote straight through — exactly the failure mode the lint
+    exists to close, since kanban_check_deployed treats an empty value as
+    permanently invalid."""
+    board, client = _board({("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA}})
+    result = board.set_property("page-1", "DeployComponent", "")
+    assert result["ok"] is False
+    assert not [c for c in client.calls if c[0] == "PATCH"]
+    result = board.set_property("page-1", "DeployToVersion", "   ")
+    assert result["ok"] is False
+    assert not [c for c in client.calls if c[0] == "PATCH"]
+
+
+def test_set_property_still_allows_clearing_a_deploy_field_with_none():
+    """`value=None` is this method's own documented "clear the property"
+    contract — a deliberate reset, not a malformed write, so it must not be
+    rejected by the lint the way an empty string now is."""
+    board, client = _board({("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA}})
+    result = board.set_property("page-1", "DeployComponent", None)
+    assert result["ok"] is True
 
 
 def test_create_card_dedupes_by_finding_key_and_bumps_occurrence():

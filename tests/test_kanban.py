@@ -582,8 +582,12 @@ def test_reping_send_success_writes_both_properties_incrementing_the_count(monke
     assert result["re_pinged"] == [{"page_id": "p1", "title": "p1", "ping_count": 3}]
 
     patches = [c for c in client.calls if c[0] == "PATCH" and c[1] == "/pages/p1"]
-    assert len(patches) == 2
-    written = {k: v for p in patches for k, v in p[2]["properties"].items()}
+    # ONE patch carrying both properties — not two separate writes, so a
+    # failure can never land one property without the other (code review
+    # finding, PR #9: a split write let a failed HumanPingCount write hide
+    # behind an already-stamped LastHumanPingAt).
+    assert len(patches) == 1
+    written = patches[0][2]["properties"]
     assert written["HumanPingCount"] == {"number": 3.0}
     assert "LastHumanPingAt" in written
     assert len(sent) == 1  # one batched send, not one per property write

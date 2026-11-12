@@ -313,27 +313,28 @@ class KanbanBoard:
         re_pinged: list[dict] = []
         write_failed: list[dict] = []
         now_iso = _now_utc().isoformat()
+        at_type = schema.get("LastHumanPingAt", {}).get("type", "date")
+        count_type = schema.get("HumanPingCount", {}).get("type", "number")
         for card in batch:
             count = (card.get("human_ping_count") or 0) + 1
+            # One PATCH carrying both properties, not two separate
+            # set_property calls: if LastHumanPingAt alone landed and
+            # HumanPingCount didn't, the next call would see a fresh
+            # LastHumanPingAt and treat the card as not-due for up to 12h —
+            # silently swallowing the very retry write_failed exists to
+            # signal (code review finding, PR #9).
             try:
-                at_write = self.set_property(card["page_id"], "LastHumanPingAt", now_iso)
-                count_write = self.set_property(card["page_id"], "HumanPingCount", count)
-            except NotionError as exc:
-                # set_property's own transport call (patch_page) can raise —
-                # unlike its validation failures (unknown property, bad
-                # value), which it already reports as {"ok": False, ...}.
-                # One card's 409/network error must not sink the batch.
+                payload = {
+                    "LastHumanPingAt": build_property_payload(at_type, now_iso),
+                    "HumanPingCount": build_property_payload(count_type, count),
+                }
+                self.client.patch_page(card["page_id"], payload)
+            except (NotionError, ValueError) as exc:
                 log.warning("reping: write failed for %s: %s", card["page_id"], exc)
                 write_failed.append({"page_id": card["page_id"], "error": str(exc)})
                 continue
-            if at_write.get("ok") and count_write.get("ok"):
-                re_pinged.append({"page_id": card["page_id"], "title": card["title"],
-                                  "ping_count": count})
-            else:
-                write_failed.append({
-                    "page_id": card["page_id"],
-                    "error": at_write.get("error") or count_write.get("error"),
-                })
+            re_pinged.append({"page_id": card["page_id"], "title": card["title"],
+                              "ping_count": count})
 
         return ({"due": len(due), "pinged": len(re_pinged), "send_ok": True,
                  "write_failed": write_failed, **extra}, re_pinged)

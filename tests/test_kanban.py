@@ -65,6 +65,24 @@ def _page(page_id="page-1", title="A card", status="Backlog", occ=1):
     }
 
 
+def _need_attention_page(page_id, *, priority="High", status="In Progress",
+                         created="2026-11-10T10:00:00.000Z", last_swept_at=None):
+    props: dict = {
+        "Name": {"type": "title", "title": [{"plain_text": page_id}]},
+        "Status": {"type": "select", "select": {"name": status}},
+        "Priority": {"type": "select", "select": {"name": priority} if priority else None},
+    }
+    if last_swept_at is not None:
+        props["LastSweptAt"] = {"type": "date", "date": {"start": last_swept_at}}
+    return {
+        "id": page_id,
+        "url": f"https://notion.so/{page_id}",
+        "created_time": created,
+        "last_edited_time": created,
+        "properties": props,
+    }
+
+
 class FakeClient:
     """Stands in for NotionClient — same three-arg request() contract."""
 
@@ -263,6 +281,110 @@ def test_missing_database_id_is_a_503_not_a_crash():
         assert "kanban_database_id" in str(exc)
     else:
         raise AssertionError("expected NotionError")
+
+
+def test_need_attention_or_filters_running_and_need_human():
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [], "has_more": False},
+    })
+    board.list_cards_need_attention()
+    query = [c for c in client.calls if c[0] == "POST"][0][2]
+    assert query["filter"] == {"or": [
+        {"property": "Status", "select": {"equals": "In Progress"}},
+        {"property": "Status", "select": {"equals": "Need Human"}},
+    ]}
+    assert query["page_size"] == 100
+
+
+def test_need_attention_resolves_the_status_property_type_from_schema():
+    """Boards can use either the legacy Select or Notion's native Status
+    type for their status property — the or-filter must match whichever the
+    live schema actually has, same as list_cards does."""
+    schema = {"Estado": {"type": "status"}}
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": schema},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [], "has_more": False},
+    })
+    board.list_cards_need_attention()
+    query = [c for c in client.calls if c[0] == "POST"][0][2]
+    assert query["filter"] == {"or": [
+        {"property": "Estado", "status": {"equals": "In Progress"}},
+        {"property": "Estado", "status": {"equals": "Need Human"}},
+    ]}
+
+
+def test_need_attention_follows_the_pagination_cursor():
+    page_a = _need_attention_page("a", created="2026-11-10T10:00:00.000Z")
+    page_b = _need_attention_page("b", created="2026-11-09T10:00:00.000Z")
+
+    def query_resp(body):
+        if body.get("start_cursor") == "cursor-1":
+            return {"results": [page_b], "has_more": False, "next_cursor": None}
+        return {"results": [page_a], "has_more": True, "next_cursor": "cursor-1"}
+
+    board, client = _board({("POST", f"/databases/{DB_ID}/query"): query_resp})
+    result = board.list_cards_need_attention()
+    assert result["scanned"] == 2
+    assert {c["page_id"] for c in result["cards"]} == {"a", "b"}
+    assert result["truncated"] is False
+
+
+def test_need_attention_caps_the_scan_and_flags_truncated():
+    def query_resp(body):
+        idx = {"c1": 1, "c2": 2}.get(body.get("start_cursor"), 0)
+        return {"results": [_need_attention_page(f"p{idx}")],
+                "has_more": True, "next_cursor": f"c{idx + 1}"}
+
+    board, client = _board({("POST", f"/databases/{DB_ID}/query"): query_resp})
+    board._NEED_ATTENTION_SCAN_CAP = 2
+    result = board.list_cards_need_attention(limit=25)
+    assert result["scanned"] == 2
+    assert result["truncated"] is True
+
+
+def test_need_attention_sorts_priority_then_created_desc_then_last_swept_asc():
+    """Verbatim spec order — do not reorder (b) and (c): missing priority
+    sorts last, created_time breaks ties within a priority, and within the
+    same created_time a never-swept card ranks above an already-swept one."""
+    pages = [
+        _need_attention_page("low-new", priority="Low", created="2026-11-12T09:00:00.000Z"),
+        _need_attention_page("high-old-swept", priority="High",
+                             created="2026-11-10T09:00:00.000Z", last_swept_at="2026-11-11"),
+        _need_attention_page("high-old-unswept", priority="High",
+                             created="2026-11-10T09:00:00.000Z"),
+        _need_attention_page("high-new", priority="High", created="2026-11-11T09:00:00.000Z"),
+        _need_attention_page("missing-priority", priority=None, created="2026-11-13T09:00:00.000Z"),
+    ]
+    board, client = _board({
+        ("POST", f"/databases/{DB_ID}/query"): {"results": pages, "has_more": False},
+    })
+    result = board.list_cards_need_attention(limit=25)
+    assert [c["page_id"] for c in result["cards"]] == [
+        "high-new", "high-old-unswept", "high-old-swept", "low-new", "missing-priority",
+    ]
+
+
+def test_need_attention_limit_is_clamped_to_1_25():
+    pages = [_need_attention_page(f"p{i}", created=f"2026-11-{i % 28 + 1:02d}T00:00:00.000Z")
+             for i in range(30)]
+    board, client = _board({
+        ("POST", f"/databases/{DB_ID}/query"): {"results": pages, "has_more": False},
+    })
+    assert len(board.list_cards_need_attention(limit=999)["cards"]) == 25
+    assert len(board.list_cards_need_attention(limit=0)["cards"]) == 1
+
+
+def test_need_attention_card_shape_adds_last_swept_at_without_touching_summarise():
+    page = _need_attention_page("p1", last_swept_at="2026-11-11")
+    board, client = _board({
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
+    })
+    card = board.list_cards_need_attention()["cards"][0]
+    assert card["last_swept_at"] == "2026-11-11"
+    assert card["title"] == "p1"
+    assert card["status"] == "In Progress"
+    assert card["priority"] == "High"
 
 
 # ── board writes ────────────────────────────────────────────────────────
@@ -704,6 +826,30 @@ def test_h_list_plumbs_plan_slug_through_to_the_board():
         "property": "PlanSlug",
         "rich_text": {"equals": "apmt-plan-umbrella-orchestration"},
     }
+
+
+def test_need_attention_is_advertised_and_handled():
+    assert "list_kanban_cards_need_attention" in {t["name"] for t in http_handler.TOOLS_SCHEMA}
+    assert http_handler.HANDLERS["list_kanban_cards_need_attention"] is http_handler._h_need_attention
+
+
+def test_h_need_attention_plumbs_limit_through_to_the_board():
+    pages = [_need_attention_page(f"p{i}") for i in range(3)]
+    board, client = _board({
+        ("POST", f"/databases/{DB_ID}/query"): {"results": pages, "has_more": False},
+    })
+    result = http_handler._h_need_attention(board, {"limit": 2})
+    assert result["count"] == 2
+    assert len(result["cards"]) == 2
+
+
+def test_mcp_need_attention_returns_cards_as_json_text():
+    board, _ = _board({
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [_need_attention_page("p1")], "has_more": False},
+    })
+    resp = _call(board, "list_kanban_cards_need_attention", {"limit": 1})
+    assert resp["result"]["isError"] is False
+    assert "p1" in resp["result"]["content"][0]["text"]
 
 
 def test_page_id_falls_back_to_the_gateway_injected_context():

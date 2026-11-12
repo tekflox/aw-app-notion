@@ -772,6 +772,30 @@ def test_set_property_accepts_a_well_formed_deploy_component_and_version():
     assert board.set_property("page-1", "DeployToVersion", "v0.35.1")["ok"] is True
 
 
+def test_set_property_rejects_an_empty_string_deploy_component_or_version():
+    """Regression: the lint used to only run when value.strip() was truthy,
+    so blanking a Deploy* field to "" (or whitespace) skipped the linter
+    entirely and wrote straight through — exactly the failure mode the lint
+    exists to close, since kanban_check_deployed treats an empty value as
+    permanently invalid."""
+    board, client = _board({("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA}})
+    result = board.set_property("page-1", "DeployComponent", "")
+    assert result["ok"] is False
+    assert not [c for c in client.calls if c[0] == "PATCH"]
+    result = board.set_property("page-1", "DeployToVersion", "   ")
+    assert result["ok"] is False
+    assert not [c for c in client.calls if c[0] == "PATCH"]
+
+
+def test_set_property_still_allows_clearing_a_deploy_field_with_none():
+    """`value=None` is this method's own documented "clear the property"
+    contract — a deliberate reset, not a malformed write, so it must not be
+    rejected by the lint the way an empty string now is."""
+    board, client = _board({("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA}})
+    result = board.set_property("page-1", "DeployComponent", None)
+    assert result["ok"] is True
+
+
 def test_create_card_dedupes_by_finding_key_and_bumps_occurrence():
     board, client = _board({
         ("POST", f"/databases/{DB_ID}/query"): {"results": [_page(occ=2)]},

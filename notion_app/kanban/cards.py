@@ -313,7 +313,16 @@ class KanbanBoard:
                         "reasons": risks,
                         "hint": "rewrite so a missing/unreachable target fails closed (exit non-zero), "
                                 "not so it exits 0 by never actually checking"}
-        if property_name in _DEPLOY_LINTERS and isinstance(value, str) and value.strip():
+        # No `value.strip()` guard here (unlike CheckHint above): an empty or
+        # whitespace-only write is exactly the case lint_deploy_component/
+        # lint_deploy_to_version themselves flag as a risk ("is empty — ...
+        # treats an empty value as invalid, not pending") — skipping the
+        # linter on falsy input would make that branch unreachable and let
+        # an agent blank one of these fields straight past the fail-closed
+        # check the whole lint exists for. `value is None` (an explicit
+        # clear, per this method's own "pass null to clear" contract) still
+        # bypasses it — clearing is a deliberate reset, not a malformed write.
+        if property_name in _DEPLOY_LINTERS and isinstance(value, str):
             risks = _DEPLOY_LINTERS[property_name](value)
             if risks:
                 return {"ok": False,

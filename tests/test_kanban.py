@@ -1020,6 +1020,13 @@ def test_lint_deploy_component_accepts_the_four_known_shapes():
     assert lint_deploy_component("remote-host") == []
 
 
+def test_lint_deploy_component_accepts_the_none_sentinel():
+    """C3 (card 4165bf3b-9510-81ea): 'none' is the explicit no-deployment-
+    needed sentinel kanban_check_deployed's deploy_reconcile.py now
+    understands — must not be write-time-rejected as an unknown class."""
+    assert lint_deploy_component("none") == []
+
+
 def test_lint_deploy_component_rejects_unknown_class():
     risks = lint_deploy_component("widget:foo")
     assert any("doesn't match any known class" in r for r in risks)
@@ -1078,6 +1085,16 @@ def test_set_property_accepts_a_well_formed_deploy_component_and_version():
     board, client = _board({("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA}})
     assert board.set_property("page-1", "DeployComponent", "app:notion")["ok"] is True
     assert board.set_property("page-1", "DeployToVersion", "v0.35.1")["ok"] is True
+
+
+def test_set_property_accepts_the_none_sentinel_deploy_component():
+    """Before the C3 lockstep fix, this write was rejected with 'doesn't
+    match any known class' — the sentinel could be written to deploy_
+    reconcile.py's own test fixtures but never to a real card."""
+    board, client = _board({("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA}})
+    result = board.set_property("page-1", "DeployComponent", "none")
+    assert result["ok"] is True
+    assert [c for c in client.calls if c[0] == "PATCH"]
 
 
 def test_set_property_rejects_an_empty_string_deploy_component_or_version():

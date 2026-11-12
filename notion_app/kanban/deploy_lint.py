@@ -11,14 +11,19 @@ version actually exists (the checker's live adapters do that) — only that
 the *shape* the checker's adapter registry depends on to even dispatch is
 well-formed. See the architect decision on card
 4165bf3b-9510-8162-89d0-dca46ba66481 for the DeployComponent namespace and
-the semver/SHA identity rules this mirrors.
+the semver/SHA identity rules this mirrors, and the v2 design on card
+4165bf3b-9510-812c for the ``'none'`` sentinel this module and the
+checker's own ``parse_component`` (agents-platform-runners,
+``deploy_reconcile.py``) must keep in lockstep across the two repos.
 """
 from __future__ import annotations
 
 import re
 
 _COMPONENT_CLASSES = ("app:", "service:")
-_COMPONENT_SCALARS = ("core", "remote-host")
+# "none" is the explicit no-deployment-needed sentinel (C3) — not a
+# namespaced component, so it's a scalar like core/remote-host, not a class.
+_COMPONENT_SCALARS = ("core", "remote-host", "none")
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$")
 
 _SEMVER_RE = re.compile(r"^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")

@@ -112,6 +112,29 @@ def _configured_client(tmp_path):
     return client, ctx
 
 
+def test_cards_need_attention_runs_off_the_event_loop(monkeypatch):
+    """Code-review finding (PR #7): this is the only GET route whose board
+    call paginates multiple paced/retried Notion requests and is polled
+    periodically (the kanban-sweep dag Workflow's http node), so running it
+    synchronously inside the handler would stall this in-process app's
+    shared event loop on every poll. Assert the handler actually goes
+    through run_in_threadpool, not just that the response still works."""
+    calls = []
+    real_run_in_threadpool = routes.run_in_threadpool
+
+    async def spy(fn, *args, **kwargs):
+        calls.append((fn, args, kwargs))
+        return await real_run_in_threadpool(fn, *args, **kwargs)
+
+    monkeypatch.setattr(routes, "run_in_threadpool", spy)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        client, _ctx = _client(Path(tmp))  # unconfigured is enough — no Notion call needed
+        resp = client.get("/kanban/cards-need-attention")
+        assert resp.status_code == 503
+    assert len(calls) == 1
+
+
 def test_cards_need_attention_is_503_not_200_when_unconfigured():
     """The workflow gate must be able to tell "no work" from "check broken"
     — an unconfigured board has to surface as a non-2xx, never a 200 with

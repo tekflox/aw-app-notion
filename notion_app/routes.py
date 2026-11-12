@@ -28,6 +28,7 @@ config path and is read back off ``ctx.config``.
 from __future__ import annotations
 
 from fastapi import Body, FastAPI
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 
 from . import apmt as apmt_mod, mcp_config, sync as sync_mod
@@ -245,7 +246,17 @@ def build_routes(ctx) -> FastAPI:
         in mcp/http_handler.py) — for the kanban-sweep dag Workflow's
         synchronous http node to gate on, rather than requiring an MCP
         client. ``_kanban`` turns an unconfigured board's NotionError(503)
-        into a real non-2xx, so the gate can tell "no work" from "broken"."""
+        into a real non-2xx, so the gate can tell "no work" from "broken".
+
+        Run off the event loop via ``run_in_threadpool`` — this app is
+        ``"tier": "inprocess"`` (shares the main server's single event loop),
+        and the underlying scan is a paced, multi-request, possibly-retried
+        Notion call (``NotionClient._pace()``'s own "served from a
+        threadpool" invariant, client.py). The MCP path to the same method
+        already gets this for free from its single dispatch point
+        (mcp/http_handler.py's ``handle_request``); this route has no such
+        shared wrapper, and is polled periodically by the kanban-sweep dag
+        Workflow's http node, so a stall here recurs on every poll."""
         def _run(limit: int) -> dict:
             result = board.list_cards_need_attention(limit=limit)
             return {
@@ -254,7 +265,7 @@ def build_routes(ctx) -> FastAPI:
                 "counts": {"count": result["count"], "scanned": result["scanned"],
                           "truncated": result["truncated"]},
             }
-        return _kanban(_run, limit)
+        return await run_in_threadpool(_kanban, _run, limit)
 
     # ------------------------------------------------------------------
     # Notion → knowledge base sync (the monolith's ``./aw notion-sync``).

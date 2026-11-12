@@ -103,6 +103,7 @@ re-investigation.
 | Tool | Use it to |
 |---|---|
 | `list_kanban_cards` | List the board, newest first. `status` (logical key or Notion option name) filters; omit it for every card. Also `source`, `limit` (≤100), `order` (`created`/`edited`). **New — the monolith had no read tool at all.** |
+| `list_kanban_cards_need_attention` | Deterministic sweep-candidate feed: merges In Progress + Need Human cards, sorted Priority → `created_time` desc → `LastSweptAt` asc (never-swept first), top `limit` (default 10, max 25). No staleness filter, no run-check — built for the Manager's stale-sweep selector, not a general-purpose list. |
 | `get_kanban_card` | One card's summary: title, status, priority, slugs, tags, timestamps, URL. |
 | `create_kanban_task` | Create a finding card in Backlog. Dedupes by `finding_key`: an existing card is bumped (OccurrenceCount +1, `🔁 Re-detectado` callout) and a card already in Done is reopened as a **regression**. |
 | `move_kanban_task` | Move a card's Status. `comment` is posted *before* the move. `need_human` **requires** a comment. |

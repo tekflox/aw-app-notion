@@ -18,10 +18,10 @@ that is ``NotionClient.upload_file``. ``attach_kanban_presentation`` needed a
 call out to aw-app-presentations — that is ``notion_app/presentations.py``,
 and it is the only non-Notion service this app touches.
 
-Two are new: ``list_kanban_cards`` and ``get_kanban_card``. The monolith had
-no way for an agent to *read* the board at all — ``_list_kanban_cards``
-existed in its source but was never added to its ``TOOLS`` list, so it was
-unreachable.
+Three are new: ``list_kanban_cards``, ``get_kanban_card`` and
+``list_kanban_cards_need_attention``. The monolith had no way for an agent
+to *read* the board at all — ``_list_kanban_cards`` existed in its source
+but was never added to its ``TOOLS`` list, so it was unreachable.
 """
 from __future__ import annotations
 
@@ -95,6 +95,25 @@ TOOLS_SCHEMA: list[dict] = [
                 "limit": {"type": "integer", "default": 25, "description": "Max cards to return (1-100)."},
                 "order": {"type": "string", "enum": ["created", "edited"], "default": "created",
                           "description": "Sort by creation time (default) or last edit."},
+            },
+        },
+    },
+    {
+        "name": "list_kanban_cards_need_attention",
+        "description": (
+            "Deterministic candidate list for the stale-card sweep: In Progress + Need "
+            "Human cards, merged into one ordered list, top `limit` (default 10, max 25). "
+            "Sort order: Priority (High, then Medium, then Low, then missing/unknown) → "
+            "created_time descending (newest first) → LastSweptAt ascending (never-swept "
+            "cards first). No staleness filter and no run-check — call "
+            "list_kanban_cards/get_kanban_card for anything beyond this merged ordering. "
+            "Returns {count, cards, scanned, truncated}; each card is the list_kanban_cards "
+            "summary shape plus last_swept_at."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 10, "description": "Max cards to return (1-25)."},
             },
         },
     },
@@ -386,6 +405,10 @@ def _h_list(board: KanbanBoard, args: dict) -> dict:
         limit=args.get("limit") or 25, order=args.get("order") or "created")
 
 
+def _h_need_attention(board: KanbanBoard, args: dict) -> dict:
+    return board.list_cards_need_attention(limit=args.get("limit") or 10)
+
+
 def _h_get_card(board: KanbanBoard, args: dict) -> dict:
     page_id = _page_id(args)
     if not page_id:
@@ -485,6 +508,7 @@ def _h_attach_presentation(board: KanbanBoard, args: dict) -> dict:
 
 HANDLERS = {
     "list_kanban_cards": _h_list,
+    "list_kanban_cards_need_attention": _h_need_attention,
     "get_kanban_card": _h_get_card,
     "create_kanban_task": _h_create,
     "move_kanban_task": _h_move,

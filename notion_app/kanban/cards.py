@@ -59,6 +59,24 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _parse_instant(value: str | None) -> datetime | None:
+    """Parse a Notion timestamp (datetime or date-only) into a comparable
+    instant. ``Z`` → ``+00:00`` so ``fromisoformat`` accepts it; a date-only
+    value (e.g. a plain ``LastSweptAt`` date) comes back naive, so it is
+    normalised to midnight UTC rather than compared against a differently-
+    offset instant."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _file_block_label(block: dict) -> str:
     """Filename/caption text for a file/pdf/image block — what a caller who
     only remembers "the PDF I attached last week" would recognise, since
@@ -127,6 +145,86 @@ class KanbanBoard:
             "has_more": result.get("has_more", False),
             "cards": [self._summarise(p) for p in result.get("results", [])],
         }
+
+    # Priority rank for the deterministic sweep-candidate ordering below —
+    # missing/unrecognised priority sorts last, never first.
+    _PRIORITY_RANK = {"High": 0, "Medium": 1, "Low": 2}
+
+    # Scanned past this many cards, stop paginating and report truncated —
+    # a full board export is a different tool, this one is a bounded sweep feed.
+    _NEED_ATTENTION_SCAN_CAP = 500
+
+    def list_cards_need_attention(self, *, limit: int = 10) -> dict:
+        """Deterministic candidate list for the stale-card sweep: In Progress
+        + Need Human cards, one merged ordered list, top ``limit`` (clamped
+        1-25).
+
+        Sort key, exact and in this order — do not reorder (owner-decided):
+        (a) Priority — High before Medium before Low before missing/unknown;
+        (b) created_time descending (most recent first);
+        (c) LastSweptAt ascending, with unset/never-swept sorting first.
+
+        No staleness filter and no run-check here — those stay agent-side
+        (the Manager skill), same as the approved design on card 4115bf3b:
+        this tool is pure deterministic Notion-property sorting.
+        """
+        limit = max(1, min(int(limit), 25))
+        db_id = self._require_db()
+        schema = self.client.database_schema(db_id)
+        prop_name = status_property_name(schema)
+        prop_type = schema.get(prop_name, {}).get("type", "select")
+        body: dict[str, Any] = {
+            "filter": {"or": [
+                {"property": prop_name, prop_type: {"equals": self.config.notion_status("running")}},
+                {"property": prop_name, prop_type: {"equals": self.config.notion_status("need_human")}},
+            ]},
+            "page_size": 100,
+        }
+
+        pages: list[dict] = []
+        truncated = False
+        cursor: str | None = None
+        while True:
+            query = dict(body)
+            if cursor:
+                query["start_cursor"] = cursor
+            result = self.client.query_database(db_id, query)
+            pages.extend(result.get("results", []))
+            has_more = bool(result.get("has_more")) and bool(result.get("next_cursor"))
+            if len(pages) >= self._NEED_ATTENTION_SCAN_CAP:
+                pages = pages[: self._NEED_ATTENTION_SCAN_CAP]
+                truncated = has_more
+                break
+            if not has_more:
+                break
+            cursor = result.get("next_cursor")
+
+        cards = []
+        for page in pages:
+            props = page.get("properties", {})
+            last_swept_at = (extract_property_value(props["LastSweptAt"])
+                             if "LastSweptAt" in props else None)
+            card = self._summarise(page)
+            card["last_swept_at"] = last_swept_at
+            cards.append(card)
+
+        cards.sort(key=self._need_attention_sort_key)
+        return {
+            "count": min(len(cards), limit),
+            "cards": cards[:limit],
+            "scanned": len(pages),
+            "truncated": truncated,
+        }
+
+    def _need_attention_sort_key(self, card: dict) -> tuple:
+        priority_rank = self._PRIORITY_RANK.get(card.get("priority"), 3)
+        created_instant = _parse_instant(card.get("created_time"))
+        # Negated so descending creation order falls out of an ascending sort.
+        created_key = -created_instant.timestamp() if created_instant else 0.0
+        swept_instant = _parse_instant(card.get("last_swept_at"))
+        # None (never swept) sorts before any real instant.
+        swept_key = (0, 0.0) if swept_instant is None else (1, swept_instant.timestamp())
+        return (priority_rank, created_key, swept_key)
 
     def _summarise(self, page: dict) -> dict:
         props = page.get("properties", {})

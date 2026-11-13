@@ -178,6 +178,14 @@ class KanbanBoard:
     _REPING_DUE_AFTER_S = 12 * 3600
     _REPING_CAP = 20
 
+    # ...but a Need Human card nobody has *judged* human-only yet is left to
+    # the Manager's routing matrix (architect/product-owner first) instead of
+    # pinging — see _reping_is_due. That deferral is bounded: a markerless
+    # card untouched for this long pings anyway, flagged fail-open, so a
+    # starved card can never be suppressed forever (architect ruling, card
+    # 4175bf3b-9510-81e0).
+    _REPING_UNROUTED_FAILOPEN_S = 48 * 3600
+
     def list_cards_need_attention(self, *, limit: int = 10, reping: bool = False) -> dict:
         """Deterministic candidate list for the stale-card sweep: In Progress
         + Need Human cards, one merged ordered list, top ``limit`` (clamped
@@ -197,11 +205,16 @@ class KanbanBoard:
         reported, never silent (Kanban feature:kanban-need-human-deterministic-
         reping). When True: every Need Human card in the full scanned set
         (not just the top-``limit`` returned here — a low-priority card below
-        the cut must still ping) whose LastHumanPingAt is unset or >=12h old
-        gets ONE batched Telegram reminder, and only cards in a confirmed-sent
-        batch get LastHumanPingAt/HumanPingCount written. Never touches
-        LastSweptAt, SweepBlock, or any other Manager marker — this is a
-        separate human-reminder channel.
+        the cut must still ping) that ``_reping_is_due`` says is due gets ONE
+        batched Telegram reminder, and only cards in a confirmed-sent batch
+        get LastHumanPingAt/HumanPingCount written. Never touches
+        LastSweptAt, SweepBlock, or any other Manager marker — this reads
+        SweepBlock, but it is a separate human-reminder channel and writes
+        none of those.
+
+        Cards held back by the human-judged gate are counted and named in
+        ``reping["deferred_unrouted"]`` — suppressing a reminder is reported,
+        never silent.
         """
         limit = max(1, min(int(limit), 25))
         db_id = self._require_db()
@@ -237,6 +250,7 @@ class KanbanBoard:
 
         cards = []
         due: list[dict] = []
+        deferred: list[dict] = []
         for page in pages:
             props = page.get("properties", {})
             last_swept_at = (extract_property_value(props["LastSweptAt"])
@@ -245,13 +259,22 @@ class KanbanBoard:
                                   if "LastHumanPingAt" in props else None)
             human_ping_count = (extract_property_value(props["HumanPingCount"])
                                 if "HumanPingCount" in props else None)
+            sweep_block = (extract_property_value(props["SweepBlock"])
+                           if "SweepBlock" in props else None)
             card = self._summarise(page)
             card["last_swept_at"] = last_swept_at
             card["last_human_ping_at"] = last_human_ping_at
             card["human_ping_count"] = human_ping_count
+            card["sweep_block"] = sweep_block
             cards.append(card)
-            if card["status"] == need_human_status and self._reping_is_due(last_human_ping_at):
-                due.append(card)
+            if card["status"] == need_human_status and self._reping_ping_age_ok(last_human_ping_at):
+                # Old enough to ping again — but only cards the Manager has
+                # actually judged human-only (or starved past the fail-open)
+                # go in the batch. The rest are the Manager's to route.
+                if self._reping_is_due(card):
+                    due.append(card)
+                else:
+                    deferred.append(card)
 
         cards.sort(key=self._need_attention_sort_key)
         result = {
@@ -262,16 +285,71 @@ class KanbanBoard:
         }
         if reping:
             reping_result, re_pinged = self._run_reping(due, schema)
+            # Set here rather than inside _run_reping so it is present on
+            # every one of that method's degraded-return shapes too: a
+            # suppressed card must be reported even on a pass that sent
+            # nothing at all.
+            reping_result["deferred_unrouted"] = {
+                "count": len(deferred),
+                "page_ids": [card["page_id"] for card in deferred],
+            }
             result["re_pinged"] = re_pinged
             result["reping"] = reping_result
         return result
 
-    def _reping_is_due(self, last_human_ping_at: str | None) -> bool:
+    def _reping_ping_age_ok(self, last_human_ping_at: str | None) -> bool:
+        """Half of the due rule: has it been long enough since the last human
+        ping. Unset (never pinged) qualifies."""
         ping_instant = _parse_instant(last_human_ping_at)
         if ping_instant is None:
             return True
         age_s = (_now_utc() - ping_instant).total_seconds()
         return age_s >= self._REPING_DUE_AFTER_S
+
+    def _reping_human_judged(self, sweep_block: str | None) -> bool:
+        """Has the Manager itself concluded this card is human-only.
+
+        The two SweepBlock markers that mean exactly that — ``routed-human``
+        (routing-matrix destination 4) and ``escalated`` (the N=3 third-rule
+        backstop) — are written at the one moment an agent decided only a
+        human can act. Anything else, including a malformed stamp, is treated
+        as absent/not-judged, the same parse-fail-is-absent rule the Manager
+        skill applies to SweepBlock itself.
+
+        ``<detail>`` is free text and may legitimately contain a ``|``, so the
+        shape check is "at least the four fields", not "exactly four" — a
+        pipe in the detail must not silently un-arm a human's reminder.
+        """
+        parts = (sweep_block or "").strip().split("|")
+        if len(parts) < 4:
+            return False
+        return parts[0].strip() == "routed-human" or parts[1].strip() == "escalated"
+
+    def _reping_is_due(self, card: dict) -> bool:
+        """Whether one Need Human card should be in this pass's ping batch.
+
+        Due = the last human ping is old enough (unset or >=12h) AND some
+        agent has already judged the card human-only (``_reping_human_judged``)
+        — an unjudged card is left to the Manager's routing matrix, which
+        tries architect/product-owner before concluding a human is needed.
+
+        Fail-open: an unjudged card whose page hasn't been edited in
+        ``_REPING_UNROUTED_FAILOPEN_S`` pings anyway. Note that the ping's own
+        LastHumanPingAt write resets Notion's last_edited_time, which is what
+        keeps this self-limiting — the next fail-open needs another 48h of
+        real silence (architect ruling, card 4175bf3b-9510-81e0).
+        """
+        if not self._reping_ping_age_ok(card.get("last_human_ping_at")):
+            return False
+        if self._reping_human_judged(card.get("sweep_block")):
+            return True
+        edited_instant = _parse_instant(card.get("last_edited_time"))
+        if edited_instant is None:
+            # No readable edit time means the fail-open can't be evaluated at
+            # all — ping rather than suppress, which is the direction this
+            # backstop exists to fail in.
+            return True
+        return (_now_utc() - edited_instant).total_seconds() >= self._REPING_UNROUTED_FAILOPEN_S
 
     def _run_reping(self, due: list[dict], schema: dict) -> tuple[dict, list[dict]]:
         """Send one batched Telegram reminder for ``due`` Need Human cards,
@@ -293,8 +371,13 @@ class KanbanBoard:
         for card in batch:
             count = (card.get("human_ping_count") or 0) + 1
             edited = card.get("last_edited_time") or "unknown"
+            # A card in this batch is either human-judged or it got here on
+            # the 48h fail-open — say which, so a reminder nobody routed
+            # doesn't read like one an agent deliberately escalated.
+            failopen = ("" if self._reping_human_judged(card.get("sweep_block"))
+                        else " (unrouted ≥48h — fail-open)")
             lines.append(f"• {card['title']} — {card['url']} "
-                         f"(ping #{count}, last edited {edited})")
+                         f"(ping #{count}, last edited {edited}){failopen}")
         title = f"⏰ {len(batch)} card(s) still waiting on you"
 
         try:

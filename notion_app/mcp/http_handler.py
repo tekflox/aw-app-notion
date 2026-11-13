@@ -110,12 +110,17 @@ TOOLS_SCHEMA: list[dict] = [
             "cards first). No staleness filter and no run-check — call "
             "list_kanban_cards/get_kanban_card for anything beyond this merged ordering. "
             "Returns {count, cards, scanned, truncated}; each card always carries "
-            "last_swept_at, last_human_ping_at and human_ping_count. "
+            "last_swept_at, last_human_ping_at, human_ping_count and sweep_block. "
             "`reping` (default false, pure read): side effect — when true, sends a "
             "Telegram reminder to the sysadmin for every Need Human card (in the full "
             "scanned set, not just the returned cards) whose last human ping is unset or "
-            ">=12h old, then writes last_human_ping_at/human_ping_count on the cards "
-            "actually sent. Adds re_pinged and reping to the response."
+            ">=12h old AND which an agent has already judged human-only — its SweepBlock "
+            "reads `routed-human|...` or `<wall>|escalated|...`. A card no agent has "
+            "judged yet is left to the Manager's routing matrix (architect/product-owner "
+            "first) and reported under reping.deferred_unrouted instead, unless its page "
+            "has gone 48h without an edit, which pings anyway as a fail-open. Then writes "
+            "last_human_ping_at/human_ping_count on the cards actually sent. Adds "
+            "re_pinged and reping to the response."
         ),
         "inputSchema": {
             "type": "object",

@@ -801,6 +801,21 @@ def test_reping_unjudged_card_untouched_for_48h_fails_open_with_a_flagged_line(m
     assert "(unrouted ≥48h — fail-open)" in sent[0][1]
 
 
+def test_reping_unreadable_edit_time_fails_open_under_its_own_label(monkeypatch):
+    """An edit time that can't be parsed is a different thing from 48h of
+    silence: the backstop can't be evaluated, so it pings — but it must not
+    claim the card has gone 48h untouched (deep-review finding, PR #14)."""
+    monkeypatch.setattr(cards_mod, "_now_utc", lambda: NOW)
+    page = _need_attention_page("unreadable", status="Need Human")
+    page["last_edited_time"] = "not-a-timestamp"
+    board, client, sent = _reping_board([page], monkeypatch)
+
+    result = board.list_cards_need_attention(reping=True)
+    assert [c["page_id"] for c in result["re_pinged"]] == ["unreadable"]
+    assert "(unrouted, edit time unreadable — fail-open)" in sent[0][1]
+    assert "≥48h" not in sent[0][1]
+
+
 def test_reping_malformed_sweep_block_counts_as_unjudged(monkeypatch):
     """Parse-fail is absent, exactly as the Manager skill treats SweepBlock —
     and absent means the Manager routes it, not that a human gets pinged."""

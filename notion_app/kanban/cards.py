@@ -325,6 +325,23 @@ class KanbanBoard:
             return False
         return parts[0].strip() == "routed-human" or parts[1].strip() == "escalated"
 
+    def _reping_failopen_reason(self, card: dict) -> str | None:
+        """Why an unjudged card is being pinged anyway, or None if it isn't.
+
+        Two distinct reasons, labelled distinctly because they say different
+        things to whoever reads the reminder: the card really has gone
+        ``_REPING_UNROUTED_FAILOPEN_S`` without an edit, or its edit time
+        couldn't be read at all — in which case the backstop can't be
+        evaluated and errs toward pinging, which is the direction it exists
+        to fail in. Only the first means "nothing has happened here in 48h".
+        """
+        edited_instant = _parse_instant(card.get("last_edited_time"))
+        if edited_instant is None:
+            return "unrouted, edit time unreadable — fail-open"
+        if (_now_utc() - edited_instant).total_seconds() >= self._REPING_UNROUTED_FAILOPEN_S:
+            return "unrouted ≥48h — fail-open"
+        return None
+
     def _reping_is_due(self, card: dict) -> bool:
         """Whether one Need Human card should be in this pass's ping batch.
 
@@ -333,23 +350,17 @@ class KanbanBoard:
         — an unjudged card is left to the Manager's routing matrix, which
         tries architect/product-owner before concluding a human is needed.
 
-        Fail-open: an unjudged card whose page hasn't been edited in
-        ``_REPING_UNROUTED_FAILOPEN_S`` pings anyway. Note that the ping's own
+        Fail-open: an unjudged card pings anyway for either reason
+        ``_reping_failopen_reason`` gives. Note that the ping's own
         LastHumanPingAt write resets Notion's last_edited_time, which is what
-        keeps this self-limiting — the next fail-open needs another 48h of
-        real silence (architect ruling, card 4175bf3b-9510-81e0).
+        keeps the 48h case self-limiting — the next fail-open needs another
+        48h of real silence (architect ruling, card 4175bf3b-9510-81e0).
         """
         if not self._reping_ping_age_ok(card.get("last_human_ping_at")):
             return False
         if self._reping_human_judged(card.get("sweep_block")):
             return True
-        edited_instant = _parse_instant(card.get("last_edited_time"))
-        if edited_instant is None:
-            # No readable edit time means the fail-open can't be evaluated at
-            # all — ping rather than suppress, which is the direction this
-            # backstop exists to fail in.
-            return True
-        return (_now_utc() - edited_instant).total_seconds() >= self._REPING_UNROUTED_FAILOPEN_S
+        return self._reping_failopen_reason(card) is not None
 
     def _run_reping(self, due: list[dict], schema: dict) -> tuple[dict, list[dict]]:
         """Send one batched Telegram reminder for ``due`` Need Human cards,
@@ -372,12 +383,15 @@ class KanbanBoard:
             count = (card.get("human_ping_count") or 0) + 1
             edited = card.get("last_edited_time") or "unknown"
             # A card in this batch is either human-judged or it got here on
-            # the 48h fail-open — say which, so a reminder nobody routed
-            # doesn't read like one an agent deliberately escalated.
-            failopen = ("" if self._reping_human_judged(card.get("sweep_block"))
-                        else " (unrouted ≥48h — fail-open)")
+            # a fail-open — say which, and which fail-open, so a reminder
+            # nobody routed doesn't read like one an agent deliberately
+            # escalated, and an unreadable timestamp doesn't read as 48h of
+            # genuine silence.
+            reason = (None if self._reping_human_judged(card.get("sweep_block"))
+                      else self._reping_failopen_reason(card))
             lines.append(f"• {card['title']} — {card['url']} "
-                         f"(ping #{count}, last edited {edited}){failopen}")
+                         f"(ping #{count}, last edited {edited})"
+                         f"{f' ({reason})' if reason else ''}")
         title = f"⏰ {len(batch)} card(s) still waiting on you"
 
         try:

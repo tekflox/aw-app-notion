@@ -78,7 +78,8 @@ def _page(page_id="page-1", title="A card", status="Backlog", occ=1):
 
 def _need_attention_page(page_id, *, priority="High", status="In Progress",
                          created="2026-11-10T10:00:00.000Z", last_swept_at=None,
-                         last_human_ping_at=None, human_ping_count=None):
+                         last_human_ping_at=None, human_ping_count=None,
+                         sweep_block=None, last_edited=None):
     props: dict = {
         "Name": {"type": "title", "title": [{"plain_text": page_id}]},
         "Status": {"type": "select", "select": {"name": status}},
@@ -90,13 +91,25 @@ def _need_attention_page(page_id, *, priority="High", status="In Progress",
         props["LastHumanPingAt"] = {"type": "date", "date": {"start": last_human_ping_at}}
     if human_ping_count is not None:
         props["HumanPingCount"] = {"type": "number", "number": human_ping_count}
+    if sweep_block is not None:
+        props["SweepBlock"] = {"type": "rich_text",
+                               "rich_text": [{"plain_text": sweep_block}]}
     return {
         "id": page_id,
         "url": f"https://notion.so/{page_id}",
         "created_time": created,
-        "last_edited_time": created,
+        "last_edited_time": last_edited or created,
         "properties": props,
     }
+
+
+# A SweepBlock the Manager writes at routing-matrix destination 4 — i.e. the
+# card it just judged human-only. Every reping test that expects a ping passes
+# one of these explicitly: without a marker a card only pings via the 48h
+# fail-open, which would make those tests silently depend on how far in the
+# past the fixture's last_edited_time happens to sit.
+JUDGED = "routed-human|1|2026-11-11T09:00:00+00:00|manager pass 3"
+ESCALATED = "qa-dedup-409|escalated|2026-11-11T09:00:00+00:00|run eae68794"
 
 
 # Board schema that DOES declare the reping-tracking properties — used by
@@ -480,12 +493,12 @@ def test_reping_boundary_is_greater_or_equal_not_strictly_greater(monkeypatch):
     monkeypatch.setattr(cards_mod, "_now_utc", lambda: fixed_now)
 
     not_due = _need_attention_page(
-        "not-due", status="Need Human",
+        "not-due", status="Need Human", sweep_block=JUDGED,
         last_human_ping_at=(fixed_now - timedelta(hours=11, minutes=59)).isoformat())
     due = _need_attention_page(
-        "due", status="Need Human",
+        "due", status="Need Human", sweep_block=JUDGED,
         last_human_ping_at=(fixed_now - timedelta(hours=12)).isoformat())
-    unset = _need_attention_page("unset", status="Need Human")
+    unset = _need_attention_page("unset", status="Need Human", sweep_block=JUDGED)
     board, client = _board({
         ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
         ("POST", f"/databases/{DB_ID}/query"): {
@@ -501,7 +514,7 @@ def test_reping_boundary_is_greater_or_equal_not_strictly_greater(monkeypatch):
 
 
 def test_reping_send_failure_writes_nothing(monkeypatch):
-    page = _need_attention_page("p1", status="Need Human")
+    page = _need_attention_page("p1", status="Need Human", sweep_block=JUDGED)
     board, client = _board({
         ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
         ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
@@ -519,7 +532,7 @@ def test_reping_send_failure_writes_nothing(monkeypatch):
 
 
 def test_reping_not_configured_is_skipped_not_an_error(monkeypatch):
-    page = _need_attention_page("p1", status="Need Human")
+    page = _need_attention_page("p1", status="Need Human", sweep_block=JUDGED)
     board, client = _board({
         ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
         ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
@@ -547,7 +560,8 @@ def test_reping_true_with_nothing_due_sends_nothing(monkeypatch):
                         lambda title, text: called.append(1) or {"ok": True})
 
     result = board.list_cards_need_attention(reping=True)
-    assert result["reping"] == {"due": 0, "pinged": 0, "send_ok": True, "write_failed": []}
+    assert result["reping"] == {"due": 0, "pinged": 0, "send_ok": True, "write_failed": [],
+                                "deferred_unrouted": {"count": 0, "page_ids": []}}
     assert result["re_pinged"] == []
     assert called == []
 
@@ -556,7 +570,7 @@ def test_reping_relay_answering_ok_false_without_raising_writes_nothing(monkeypa
     """apmt.send_sysadmin_report can return a body instead of raising — AP-MT's
     report_notify answers {"ok": sent > 0, ...} even on a 200, so an all-failed
     chunked send must be read from the body, not inferred from "it didn't throw"."""
-    page = _need_attention_page("p1", status="Need Human")
+    page = _need_attention_page("p1", status="Need Human", sweep_block=JUDGED)
     board, client = _board({
         ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
         ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
@@ -571,8 +585,8 @@ def test_reping_relay_answering_ok_false_without_raising_writes_nothing(monkeypa
 
 
 def test_reping_a_failed_per_card_write_is_listed_but_does_not_abort_the_batch(monkeypatch):
-    ok_page = _need_attention_page("ok", status="Need Human")
-    fails_page = _need_attention_page("fails", status="Need Human")
+    ok_page = _need_attention_page("ok", status="Need Human", sweep_block=JUDGED)
+    fails_page = _need_attention_page("fails", status="Need Human", sweep_block=JUDGED)
     board, client = _board({
         ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
         ("POST", f"/databases/{DB_ID}/query"): {"results": [ok_page, fails_page], "has_more": False},
@@ -594,7 +608,8 @@ def test_reping_a_failed_per_card_write_is_listed_but_does_not_abort_the_batch(m
 
 
 def test_reping_send_success_writes_both_properties_incrementing_the_count(monkeypatch):
-    page = _need_attention_page("p1", status="Need Human", human_ping_count=2)
+    page = _need_attention_page("p1", status="Need Human", human_ping_count=2,
+                                sweep_block=JUDGED)
     board, client = _board({
         ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
         ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
@@ -624,9 +639,9 @@ def test_reping_pings_a_due_card_below_the_top_limit_cut(monkeypatch):
     """A low-priority card that doesn't make the top-`limit` cut must still
     be in the due set — reping scope is the full scanned set, not `cards`."""
     high = _need_attention_page("high", priority="High", status="Need Human",
-                                created="2026-11-12T09:00:00.000Z")
+                                created="2026-11-12T09:00:00.000Z", sweep_block=JUDGED)
     low = _need_attention_page("low", priority="Low", status="Need Human",
-                               created="2026-11-10T09:00:00.000Z")
+                               created="2026-11-10T09:00:00.000Z", sweep_block=JUDGED)
     board, client = _board({
         ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
         ("POST", f"/databases/{DB_ID}/query"): {"results": [high, low], "has_more": False},
@@ -642,7 +657,7 @@ def test_reping_pings_a_due_card_below_the_top_limit_cut(monkeypatch):
 
 
 def test_reping_missing_board_schema_skips_the_whole_branch_without_crashing(monkeypatch):
-    page = _need_attention_page("p1", status="Need Human")
+    page = _need_attention_page("p1", status="Need Human", sweep_block=JUDGED)
     board, client = _board({
         ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},  # no LastHumanPingAt/HumanPingCount
         ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
@@ -653,14 +668,16 @@ def test_reping_missing_board_schema_skips_the_whole_branch_without_crashing(mon
 
     result = board.list_cards_need_attention(reping=True)
     assert result["reping"] == {"due": 1, "pinged": 0, "send_ok": False, "write_failed": [],
-                                "skipped": "LastHumanPingAt/HumanPingCount not in board schema"}
+                                "skipped": "LastHumanPingAt/HumanPingCount not in board schema",
+                                "deferred_unrouted": {"count": 0, "page_ids": []}}
     assert result["re_pinged"] == []
     assert called == []  # never even tried to send
     assert not any(c[0] == "PATCH" for c in client.calls)
 
 
 def test_reping_one_batched_send_for_n_due_cards_not_n_sends(monkeypatch):
-    pages = [_need_attention_page(f"p{i}", status="Need Human") for i in range(5)]
+    pages = [_need_attention_page(f"p{i}", status="Need Human", sweep_block=JUDGED)
+             for i in range(5)]
     board, client = _board({
         ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
         ("POST", f"/databases/{DB_ID}/query"): {"results": pages, "has_more": False},
@@ -676,7 +693,8 @@ def test_reping_one_batched_send_for_n_due_cards_not_n_sends(monkeypatch):
 
 
 def test_reping_caps_the_due_batch_at_20_and_flags_truncated(monkeypatch):
-    pages = [_need_attention_page(f"p{i}", status="Need Human") for i in range(25)]
+    pages = [_need_attention_page(f"p{i}", status="Need Human", sweep_block=JUDGED)
+             for i in range(25)]
     board, client = _board({
         ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
         ("POST", f"/databases/{DB_ID}/query"): {"results": pages, "has_more": False},
@@ -691,7 +709,8 @@ def test_reping_caps_the_due_batch_at_20_and_flags_truncated(monkeypatch):
 
 
 def test_reping_never_touches_last_swept_at_or_sweep_block(monkeypatch):
-    page = _need_attention_page("p1", status="Need Human", last_swept_at="2026-11-01")
+    page = _need_attention_page("p1", status="Need Human", last_swept_at="2026-11-01",
+                                sweep_block=JUDGED)
     board, client = _board({
         ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
         ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
@@ -704,6 +723,139 @@ def test_reping_never_touches_last_swept_at_or_sweep_block(monkeypatch):
     written_props = {k for p in patches for k in p[2]["properties"]}
     assert "LastSweptAt" not in written_props
     assert "SweepBlock" not in written_props
+
+
+# ── need-attention: reping's human-judged gate ─────────────────────────
+#
+# The 12h reminder only fires for a card some agent already judged
+# human-only (SweepBlock `routed-human|…` / `<wall>|escalated|…`). Anything
+# else is the Manager's to route (architect/PO first) — held back, reported,
+# and pinged anyway once it has gone 48h with no edit at all.
+
+def _reping_board(pages, monkeypatch):
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": pages, "has_more": False},
+    })
+    sent: list = []
+    monkeypatch.setattr(cards_mod.apmt, "send_sysadmin_report",
+                        lambda title, text: (sent.append((title, text)),
+                                             {"ok": True, "sent": 1})[1])
+    return board, client, sent
+
+
+# All four tests below pin "now" to 2026-11-13T12:00Z: `recent` (12h before
+# it) is ping-age-due but nowhere near the 48h fail-open, `starved` (72h
+# before it) is past both.
+NOW = datetime(2026, 11, 13, 12, 0, 0, tzinfo=timezone.utc)
+RECENT_EDIT = "2026-11-13T00:00:00+00:00"   # 12h old
+STARVED_EDIT = "2026-11-10T12:00:00+00:00"  # 72h old
+
+
+def test_reping_judged_card_past_12h_still_pings(monkeypatch):
+    """The whole point of the gate is that it changes nothing for a card the
+    Manager already routed to a human — destination 4 arms the reminder."""
+    monkeypatch.setattr(cards_mod, "_now_utc", lambda: NOW)
+    pages = [_need_attention_page("routed", status="Need Human", sweep_block=JUDGED,
+                                  last_edited=RECENT_EDIT),
+             _need_attention_page("escalated", status="Need Human", sweep_block=ESCALATED,
+                                  last_edited=RECENT_EDIT)]
+    board, client, sent = _reping_board(pages, monkeypatch)
+
+    result = board.list_cards_need_attention(reping=True)
+    # Both markers are recognised: destination 4's and the N=3 backstop's.
+    assert {c["page_id"] for c in result["re_pinged"]} == {"routed", "escalated"}
+    assert result["reping"]["deferred_unrouted"] == {"count": 0, "page_ids": []}
+    assert "fail-open" not in sent[0][1]
+
+
+def test_reping_unjudged_card_is_suppressed_and_reported_not_silent(monkeypatch):
+    """A Need Human card no agent has judged yet is left to the Manager's
+    routing matrix — but the suppression is named in the result, so a pass
+    that pinged nobody can still be told apart from one with nothing due."""
+    monkeypatch.setattr(cards_mod, "_now_utc", lambda: NOW)
+    pages = [_need_attention_page("unrouted", status="Need Human",
+                                  last_edited=RECENT_EDIT)]
+    board, client, sent = _reping_board(pages, monkeypatch)
+
+    result = board.list_cards_need_attention(reping=True)
+    assert result["reping"]["due"] == 0
+    assert result["reping"]["deferred_unrouted"] == {"count": 1, "page_ids": ["unrouted"]}
+    assert result["re_pinged"] == []
+    assert sent == []  # no Telegram send at all
+    assert not any(c[0] == "PATCH" for c in client.calls)
+
+
+def test_reping_unjudged_card_untouched_for_48h_fails_open_with_a_flagged_line(monkeypatch):
+    """The starvation backstop: an unrouted card nobody has edited in 48h
+    pings anyway, and its line says so — a reminder nobody routed must not
+    read like one an agent deliberately escalated."""
+    monkeypatch.setattr(cards_mod, "_now_utc", lambda: NOW)
+    pages = [_need_attention_page("starved", status="Need Human",
+                                  last_edited=STARVED_EDIT)]
+    board, client, sent = _reping_board(pages, monkeypatch)
+
+    result = board.list_cards_need_attention(reping=True)
+    assert [c["page_id"] for c in result["re_pinged"]] == ["starved"]
+    assert result["reping"]["deferred_unrouted"] == {"count": 0, "page_ids": []}
+    assert "(unrouted ≥48h — fail-open)" in sent[0][1]
+
+
+def test_reping_unreadable_edit_time_fails_open_under_its_own_label(monkeypatch):
+    """An edit time that can't be parsed is a different thing from 48h of
+    silence: the backstop can't be evaluated, so it pings — but it must not
+    claim the card has gone 48h untouched (deep-review finding, PR #14)."""
+    monkeypatch.setattr(cards_mod, "_now_utc", lambda: NOW)
+    page = _need_attention_page("unreadable", status="Need Human")
+    page["last_edited_time"] = "not-a-timestamp"
+    board, client, sent = _reping_board([page], monkeypatch)
+
+    result = board.list_cards_need_attention(reping=True)
+    assert [c["page_id"] for c in result["re_pinged"]] == ["unreadable"]
+    assert "(unrouted, edit time unreadable — fail-open)" in sent[0][1]
+    assert "≥48h" not in sent[0][1]
+
+
+def test_reping_malformed_sweep_block_counts_as_unjudged(monkeypatch):
+    """Parse-fail is absent, exactly as the Manager skill treats SweepBlock —
+    and absent means the Manager routes it, not that a human gets pinged."""
+    monkeypatch.setattr(cards_mod, "_now_utc", lambda: NOW)
+    pages = [
+        _need_attention_page("short", status="Need Human", last_edited=RECENT_EDIT,
+                             sweep_block="routed-human|1"),
+        _need_attention_page("empty", status="Need Human", last_edited=RECENT_EDIT,
+                             sweep_block=""),
+        _need_attention_page("other-wall", status="Need Human", last_edited=RECENT_EDIT,
+                             sweep_block="qa-dedup-409|2|2026-11-12T09:00:00+00:00|run x"),
+    ]
+    board, client, sent = _reping_board(pages, monkeypatch)
+
+    result = board.list_cards_need_attention(reping=True)
+    assert result["reping"]["due"] == 0
+    assert result["reping"]["deferred_unrouted"]["count"] == 3
+    assert sent == []
+
+
+def test_reping_detail_containing_a_pipe_still_reads_as_judged(monkeypatch):
+    """`<detail>` is free text. A pipe in it must not demote a real
+    destination-4 marker to "unjudged" and mute the human's reminder."""
+    monkeypatch.setattr(cards_mod, "_now_utc", lambda: NOW)
+    pages = [_need_attention_page(
+        "piped", status="Need Human", last_edited=RECENT_EDIT,
+        sweep_block="routed-human|1|2026-11-12T09:00:00+00:00|needs prod creds | asked")]
+    board, client, sent = _reping_board(pages, monkeypatch)
+
+    result = board.list_cards_need_attention(reping=True)
+    assert [c["page_id"] for c in result["re_pinged"]] == ["piped"]
+
+
+def test_need_attention_cards_carry_sweep_block_on_the_pure_read_too(monkeypatch):
+    page = _need_attention_page("p1", sweep_block=JUDGED)
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_REPING},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [page], "has_more": False},
+    })
+    assert board.list_cards_need_attention()["cards"][0]["sweep_block"] == JUDGED
 
 
 def test_h_need_attention_coerces_a_stringified_false_reping_flag(monkeypatch):

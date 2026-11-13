@@ -84,7 +84,9 @@ TOOLS_SCHEMA: list[dict] = [
             "'running', 'need_human', 'done', 'ready_to_deploy', 'auto_resolved', "
             "'planned', 'archived') or a raw Notion option name. Returns page_id, title, "
             "status, priority, source, agent/target slug, tags, occurrence count, "
-            "timestamps and the card URL — start here when you need a page_id."
+            "timestamps and the card URL — start here when you need a page_id. Also "
+            "returns parent_card (the parent's page id, or None) and child_cards (a list "
+            "of child page ids) from the native ParentCard/ChildCards Relation."
         ),
         "inputSchema": {
             "type": "object",
@@ -131,8 +133,10 @@ TOOLS_SCHEMA: list[dict] = [
         "name": "get_kanban_card",
         "description": (
             "Read one card's summary — title, status, priority, slugs, tags, timestamps, "
-            "URL. Use get_kanban_properties instead when you need arbitrary/custom "
-            "properties rather than this fixed summary.\n\n"
+            "URL, parent_card (the parent's page id, or None) and child_cards (a list of "
+            "child page ids) from the native ParentCard/ChildCards Relation. Use "
+            "get_kanban_properties instead when you need arbitrary/custom properties "
+            "rather than this fixed summary.\n\n"
             "The card's actual CONTENT is not in the summary: the task description is the "
             "page body and the history is the comment thread. Pass include_body and "
             "include_comments to get those as markdown — do that whenever you're about to "

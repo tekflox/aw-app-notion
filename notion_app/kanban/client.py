@@ -368,6 +368,12 @@ def build_property_payload(prop_type: str, value: Any) -> dict:
     if prop_type == "title":
         return {"title": [{"text": {"content": str(value)[:RICH_TEXT_LIMIT]}}]}
     if prop_type == "relation":
+        # An empty string/list is "no value" everywhere else in this module
+        # (TargetSlug, PlanSlug, parent_card itself) — treat it as a clear
+        # here too, rather than sending Notion a relation entry with an
+        # empty id and getting a 400 back.
+        if not value:
+            return {"relation": []}
         ids = value if isinstance(value, list) else [value]
         return {"relation": [{"id": i} for i in ids]}
     raise ValueError(f"unsupported property type '{prop_type}'")

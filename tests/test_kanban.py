@@ -259,6 +259,15 @@ def test_relation_property_build_extract_roundtrip():
     assert extract_property_value({"type": "relation", "relation": []}) == []
 
 
+def test_relation_build_treats_empty_string_as_a_clear_not_a_malformed_id():
+    """Every other optional field in this module (TargetSlug, PlanSlug,
+    parent_card itself) treats an empty string as "no value" — the relation
+    branch must match, or set_kanban_property("ParentCard", "") sends Notion
+    {"relation": [{"id": ""}]} and gets a 400 instead of clearing the link."""
+    assert build_property_payload("relation", "") == {"relation": []}
+    assert build_property_payload("relation", []) == {"relation": []}
+
+
 def test_title_is_found_by_type_not_by_name():
     """The monolith wrote `Name` but read `Task` in places; a board renamed in
     Notion's UI broke both."""
@@ -820,6 +829,17 @@ def test_set_property_string_null_clears_like_a_real_none():
     assert result["value"] is None
     patch = [c for c in client.calls if c[0] == "PATCH"][0][2]
     assert patch["properties"]["Priority"] == {"select": None}
+
+
+def test_set_property_empty_string_clears_a_relation_instead_of_400ing():
+    """set_kanban_property("ParentCard", "") is the un-parent path named in
+    the design doc — it must clear the relation the same way `None` would,
+    not send Notion a relation entry with an empty id."""
+    board, client = _board({("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA}})
+    result = board.set_property("page-1", "ParentCard", "")
+    assert result["ok"] is True
+    patch = [c for c in client.calls if c[0] == "PATCH"][0][2]
+    assert patch["properties"]["ParentCard"] == {"relation": []}
 
 
 def test_coerce_transport_value_only_touches_the_three_exact_literals():

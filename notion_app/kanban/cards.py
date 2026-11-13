@@ -261,11 +261,23 @@ class KanbanBoard:
                                 if "HumanPingCount" in props else None)
             sweep_block = (extract_property_value(props["SweepBlock"])
                            if "SweepBlock" in props else None)
+            # The board's own QA verdict, read the same tolerant way as the
+            # markers above. Card 4175bf3b-9510-8191: an In Progress card
+            # carrying QAStatus=need_human is a verdict somebody recorded and
+            # nobody enacted — the Manager's Priority check needs that signal
+            # from the CARD, because its other source (a list_runs scan for
+            # flow_needs_human) saturates its 300-row window at ~11h and is
+            # structurally blind to anything older. Purely additive: this tool
+            # stays deterministic property-sorting, and what the signal MEANS
+            # is the Manager's call, not this function's.
+            qa_status = (extract_property_value(props["QAStatus"])
+                         if "QAStatus" in props else None)
             card = self._summarise(page)
             card["last_swept_at"] = last_swept_at
             card["last_human_ping_at"] = last_human_ping_at
             card["human_ping_count"] = human_ping_count
             card["sweep_block"] = sweep_block
+            card["qa_status"] = qa_status
             cards.append(card)
             if card["status"] == need_human_status and self._reping_ping_age_ok(last_human_ping_at):
                 # Old enough to ping again — but only cards the Manager has

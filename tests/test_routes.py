@@ -60,17 +60,24 @@ NEED_ATTENTION_SCHEMA = {"Status": {"type": "select"}, "Priority": {"type": "sel
 
 
 def _need_attention_page(page_id, *, priority="High", status="In Progress",
-                         created="2026-11-10T10:00:00.000Z"):
+                         created="2026-11-10T10:00:00.000Z", qa_status=None):
+    """One candidate page. ``qa_status=None`` leaves the QAStatus property
+    OFF the page entirely, which is the common real shape — the board's
+    QAStatus is unset on most cards — and the one the reader has to tolerate.
+    """
+    props = {
+        "Name": {"type": "title", "title": [{"plain_text": page_id}]},
+        "Status": {"type": "select", "select": {"name": status}},
+        "Priority": {"type": "select", "select": {"name": priority}},
+    }
+    if qa_status is not None:
+        props["QAStatus"] = {"type": "select", "select": {"name": qa_status}}
     return {
         "id": page_id,
         "url": f"https://notion.so/{page_id}",
         "created_time": created,
         "last_edited_time": created,
-        "properties": {
-            "Name": {"type": "title", "title": [{"plain_text": page_id}]},
-            "Status": {"type": "select", "select": {"name": status}},
-            "Priority": {"type": "select", "select": {"name": priority}},
-        },
+        "properties": props,
     }
 
 
@@ -229,6 +236,29 @@ def test_cards_need_attention_matches_the_mcp_tool_for_the_same_fixture():
     assert [c["page_id"] for c in route_body["cards"]] == [c["page_id"] for c in mcp_result["cards"]]
     assert route_body["counts"]["count"] == mcp_result["count"]
     assert route_body["counts"]["scanned"] == mcp_result["scanned"]
+
+
+def test_cards_need_attention_carries_each_cards_qa_status(monkeypatch):
+    """Card 4175bf3b-9510-8191: the Manager's Priority check needs to see an
+    In Progress card whose QA verdict is already `need_human` — a verdict
+    somebody recorded and nobody enacted. Its other source for that signal
+    is a `list_runs` scan whose window saturates at ~11h, so the card
+    property is the durable one and has to reach the candidate list.
+
+    The second card is the control: QAStatus absent from the page must read
+    as None, not raise and not inherit the neighbour's value.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        client, _ctx = _configured_client(Path(tmp))
+        _patch_notion_api(monkeypatch, [
+            _need_attention_page("p1", qa_status="need_human"),
+            _need_attention_page("p2"),
+        ])
+
+        body = client.get("/kanban/cards-need-attention").json()
+        by_id = {c["page_id"]: c for c in body["cards"]}
+        assert by_id["p1"]["qa_status"] == "need_human"
+        assert by_id["p2"]["qa_status"] is None
 
 
 def test_cards_need_attention_default_omits_reping_keys(monkeypatch):

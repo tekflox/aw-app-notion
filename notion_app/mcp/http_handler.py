@@ -84,7 +84,9 @@ TOOLS_SCHEMA: list[dict] = [
             "'running', 'need_human', 'done', 'ready_to_deploy', 'auto_resolved', "
             "'planned', 'archived') or a raw Notion option name. Returns page_id, title, "
             "status, priority, source, agent/target slug, tags, occurrence count, "
-            "timestamps and the card URL — start here when you need a page_id."
+            "timestamps and the card URL — start here when you need a page_id. Also "
+            "returns parent_card (the parent's page id, or None) and child_cards (a list "
+            "of child page ids) from the native ParentCard/ChildCards Relation."
         ),
         "inputSchema": {
             "type": "object",
@@ -131,8 +133,10 @@ TOOLS_SCHEMA: list[dict] = [
         "name": "get_kanban_card",
         "description": (
             "Read one card's summary — title, status, priority, slugs, tags, timestamps, "
-            "URL. Use get_kanban_properties instead when you need arbitrary/custom "
-            "properties rather than this fixed summary.\n\n"
+            "URL, parent_card (the parent's page id, or None) and child_cards (a list of "
+            "child page ids) from the native ParentCard/ChildCards Relation. Use "
+            "get_kanban_properties instead when you need arbitrary/custom properties "
+            "rather than this fixed summary.\n\n"
             "The card's actual CONTENT is not in the summary: the task description is the "
             "page body and the history is the comment thread. Pass include_body and "
             "include_comments to get those as markdown — do that whenever you're about to "
@@ -158,7 +162,10 @@ TOOLS_SCHEMA: list[dict] = [
             "Done is reopened to Backlog as a regression. The card is created in Backlog. "
             "NOTE: unlike the monolith's version of this tool, no Telegram approval is "
             "sent and no agent run is dispatched — that is agents-platform's job and is "
-            "not wired into this app. Returns {page_id, url, is_new, occurrence_count}."
+            "not wired into this app. Returns {page_id, url, is_new, occurrence_count}. "
+            "NOTE: a dedup bump (same finding_key, existing card) does NOT re-parent — "
+            "the bumped card keeps its original parent_card even if this call passes a "
+            "different one."
         ),
         "inputSchema": {
             "type": "object",
@@ -175,6 +182,7 @@ TOOLS_SCHEMA: list[dict] = [
                 "plan": {"type": "string", "description": "Full analysis and execution plan for the card body: what was found, how detected, impact, step-by-step fix, verification."},
                 "source": {"type": "string", "description": "Agent that created this finding, e.g. 'system-analyst'."},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags, e.g. ['resilience', 'docker']. Max 5."},
+                "parent_card": {"type": "string", "description": "Page id of the parent card when this is a sub-task of another card (e.g. an epic). Leave empty for a top-level card."},
             },
             "required": ["title"],
         },
@@ -441,7 +449,7 @@ def _h_create(board: KanbanBoard, args: dict) -> dict:
         input_text=args.get("input_text") or "",
         check_hint=args.get("check_hint") or "", description=args.get("description") or "",
         plan=args.get("plan") or "", source=args.get("source") or "",
-        tags=args.get("tags") or [])
+        tags=args.get("tags") or [], parent_card=args.get("parent_card") or "")
 
 
 def _h_move(board: KanbanBoard, args: dict) -> dict:

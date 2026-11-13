@@ -42,6 +42,8 @@ SCHEMA = {
     "FindingKey": {"type": "rich_text"},
     "TargetSlug": {"type": "rich_text"},
     "PlanSlug": {"type": "rich_text"},
+    "ParentCard": {"type": "relation"},
+    "ChildCards": {"type": "relation"},
     "AgentSlug": {"type": "select"},
     "CheckHint": {"type": "rich_text"},
     "OccurrenceCount": {"type": "number"},
@@ -239,6 +241,31 @@ def test_native_status_type_is_supported():
 def test_clearing_a_property_uses_the_per_type_empty_shape():
     assert build_property_payload("multi_select", None) == {"multi_select": []}
     assert build_property_payload("select", None) == {"select": None}
+    assert build_property_payload("relation", None) == {"relation": []}
+
+
+def test_relation_property_build_extract_roundtrip():
+    """ParentCard <-> ChildCards is a native two-way Notion Relation — the
+    write seam accepts a single id (one-element list) or an explicit list
+    (e.g. multiple ChildCards), and extract always returns a list of ids."""
+    assert build_property_payload("relation", "parent-1") == {
+        "relation": [{"id": "parent-1"}]}
+    assert build_property_payload("relation", ["child-1", "child-2"]) == {
+        "relation": [{"id": "child-1"}, {"id": "child-2"}]}
+    assert extract_property_value({
+        "type": "relation",
+        "relation": [{"id": "parent-1"}],
+    }) == ["parent-1"]
+    assert extract_property_value({"type": "relation", "relation": []}) == []
+
+
+def test_relation_build_treats_empty_string_as_a_clear_not_a_malformed_id():
+    """Every other optional field in this module (TargetSlug, PlanSlug,
+    parent_card itself) treats an empty string as "no value" — the relation
+    branch must match, or set_kanban_property("ParentCard", "") sends Notion
+    {"relation": [{"id": ""}]} and gets a 400 instead of clearing the link."""
+    assert build_property_payload("relation", "") == {"relation": []}
+    assert build_property_payload("relation", []) == {"relation": []}
 
 
 def test_title_is_found_by_type_not_by_name():
@@ -804,6 +831,17 @@ def test_set_property_string_null_clears_like_a_real_none():
     assert patch["properties"]["Priority"] == {"select": None}
 
 
+def test_set_property_empty_string_clears_a_relation_instead_of_400ing():
+    """set_kanban_property("ParentCard", "") is the un-parent path named in
+    the design doc — it must clear the relation the same way `None` would,
+    not send Notion a relation entry with an empty id."""
+    board, client = _board({("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA}})
+    result = board.set_property("page-1", "ParentCard", "")
+    assert result["ok"] is True
+    patch = [c for c in client.calls if c[0] == "PATCH"][0][2]
+    assert patch["properties"]["ParentCard"] == {"relation": []}
+
+
 def test_coerce_transport_value_only_touches_the_three_exact_literals():
     """A genuine string that merely contains one of these words must pass
     through untouched — this is a narrow transport-artifact fix, not a
@@ -889,6 +927,92 @@ def test_create_card_omits_plan_slug_when_empty():
     board.create_card(title="x")
     props = [c for c in client.calls if c[1] == "/pages"][0][2]["properties"]
     assert "PlanSlug" not in props
+
+
+# ── parent/child card linking (native ParentCard <-> ChildCards Relation) ──
+
+def test_create_card_links_parent_card_via_relation():
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", "/pages"): {"id": "new-1", "url": "https://notion.so/new-1"},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": []},
+    })
+    result = board.create_card(title="sub-task", parent_card="epic-page-1")
+    props = [c for c in client.calls if c[1] == "/pages"][0][2]["properties"]
+    assert props["ParentCard"] == {"relation": [{"id": "epic-page-1"}]}
+    assert result["ok"] is True
+
+
+def test_create_card_omits_parent_card_when_empty():
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", "/pages"): {"id": "new-1"},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": []},
+    })
+    board.create_card(title="x")
+    props = [c for c in client.calls if c[1] == "/pages"][0][2]["properties"]
+    assert "ParentCard" not in props
+
+
+def test_create_card_omits_parent_card_when_board_lacks_the_property():
+    """A board without the one-time ParentCard/ChildCards schema add just
+    skips linking — same degrade-not-break pattern as FindingKey-less
+    boards, per the existing schema-aware loop in create_card."""
+    slim = {"Name": {"type": "title"}, "Status": {"type": "select"}}
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": slim},
+        ("POST", "/pages"): {"id": "new-1"},
+    })
+    result = board.create_card(title="x", parent_card="epic-page-1")
+    props = [c for c in client.calls if c[1] == "/pages"][0][2]["properties"]
+    assert "ParentCard" not in props
+    assert result["ok"] is True
+
+
+def test_create_card_with_empty_parent_card_is_byte_identical_to_today():
+    """Regression guard: a caller that never passes parent_card (every
+    existing caller, today) must get the exact same create_page payload
+    whether or not the new kwarg exists."""
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", "/pages"): {"id": "new-1"},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": []},
+    })
+    board.create_card(title="x", source="system-analyst", tags=["docker"])
+    props_without = [c for c in client.calls if c[1] == "/pages"][0][2]["properties"]
+
+    board2, client2 = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", "/pages"): {"id": "new-1"},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": []},
+    })
+    board2.create_card(title="x", source="system-analyst", tags=["docker"], parent_card="")
+    props_with_empty = [c for c in client2.calls if c[1] == "/pages"][0][2]["properties"]
+
+    assert props_without == props_with_empty
+    assert "ParentCard" not in props_without
+
+
+def test_summarise_exposes_parent_card_and_child_cards():
+    page = _page(page_id="child-1")
+    page["properties"]["ParentCard"] = {
+        "type": "relation", "relation": [{"id": "epic-page-1"}]}
+    page["properties"]["ChildCards"] = {"type": "relation", "relation": []}
+    board, _ = _board()
+    summary = board._summarise(page)
+    assert summary["parent_card"] == "epic-page-1"
+    assert summary["child_cards"] == []
+
+
+def test_summarise_parent_card_is_none_when_unparented():
+    page = _page(page_id="top-1")
+    page["properties"]["ParentCard"] = {"type": "relation", "relation": []}
+    page["properties"]["ChildCards"] = {
+        "type": "relation", "relation": [{"id": "sub-1"}, {"id": "sub-2"}]}
+    board, _ = _board()
+    summary = board._summarise(page)
+    assert summary["parent_card"] is None
+    assert summary["child_cards"] == ["sub-1", "sub-2"]
 
 
 # ── check_hint false-green gate (tooling:checkhint-false-green-on-missing-target) ──
@@ -1236,6 +1360,25 @@ def test_create_kanban_task_priority_enum_and_default_are_english():
     http_handler._h_create(board, {"title": "x"})
     props = [c for c in client.calls if c[1] == "/pages"][0][2]["properties"]
     assert props["Priority"] == {"select": {"name": "Medium"}}
+
+
+def test_create_kanban_task_tool_schema_has_optional_parent_card():
+    """parent_card must not be in `required` — making it required would
+    break every existing caller of create_kanban_task."""
+    schema = next(t for t in http_handler.TOOLS_SCHEMA if t["name"] == "create_kanban_task")
+    assert "parent_card" in schema["inputSchema"]["properties"]
+    assert "parent_card" not in schema["inputSchema"].get("required", [])
+
+
+def test_mcp_h_create_threads_parent_card_through():
+    board, client = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("POST", "/pages"): {"id": "new-1"},
+        ("POST", f"/databases/{DB_ID}/query"): {"results": []},
+    })
+    http_handler._h_create(board, {"title": "x", "parent_card": "epic-page-1"})
+    props = [c for c in client.calls if c[1] == "/pages"][0][2]["properties"]
+    assert props["ParentCard"] == {"relation": [{"id": "epic-page-1"}]}
 
 
 def test_h_create_plumbs_plan_slug_through_to_the_board():

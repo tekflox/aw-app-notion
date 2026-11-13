@@ -215,7 +215,8 @@ def build_routes(ctx) -> FastAPI:
         return _kanban(board.create_card, **{
             k: data.get(k) for k in (
                 "title", "finding_key", "priority", "agent_slug", "target_slug", "plan_slug",
-                "input_text", "check_hint", "description", "plan", "source", "tags")
+                "input_text", "check_hint", "description", "plan", "source", "tags",
+                "parent_card")
             if data.get(k) is not None
         })
 

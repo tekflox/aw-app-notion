@@ -261,6 +261,54 @@ def test_cards_need_attention_carries_each_cards_qa_status(monkeypatch):
         assert by_id["p2"]["qa_status"] is None
 
 
+def test_need_attention_tool_description_names_every_marker_field_it_returns():
+    """Drift guard, not decoration — this exact bug already shipped once.
+
+    PR #15 added `qa_status` to the per-card dict and left the tool
+    description enumerating only the four markers before it; nothing failed,
+    and it took a live call after release to notice. The description IS the
+    schema an agent reads, so a field missing from it is a field half the
+    consumers are never told about.
+
+    Scoped to the marker fields `list_cards_need_attention` adds on top of
+    `_summarise`, computed by diffing the two rather than hard-coded — a
+    hard-coded list is the same drift one level up.
+    """
+    from notion_app.kanban.cards import KanbanBoard
+    from notion_app.kanban.config import KanbanConfig
+    from notion_app.mcp import http_handler
+
+    class _FakeCtx:
+        def __init__(self):
+            self.config = {"kanban_database_id": NEED_ATTENTION_DB_ID}
+
+    class _FakeClient:
+        configured = True
+
+        def __init__(self, pages):
+            self._pages = pages
+
+        def database_schema(self, _db_id):
+            return NEED_ATTENTION_SCHEMA
+
+        def query_database(self, _db_id, _body):
+            return {"results": self._pages, "has_more": False}
+
+    page = _need_attention_page("p1", qa_status="need_human")
+    board = KanbanBoard(_FakeClient([page]), KanbanConfig(_FakeCtx()))
+    card = board.list_cards_need_attention(limit=1)["cards"][0]
+    markers = set(card) - set(board._summarise(page))
+    assert markers, "the diff found no marker fields — this guard would be vacuous"
+
+    description = next(t["description"] for t in http_handler.TOOLS_SCHEMA
+                       if t["name"] == "list_kanban_cards_need_attention")
+    missing = sorted(m for m in markers if m not in description)
+    assert not missing, (
+        f"list_kanban_cards_need_attention returns {missing} but its tool "
+        f"description never names them — agents read the description as the "
+        f"schema, so add them there too")
+
+
 def test_cards_need_attention_default_omits_reping_keys(monkeypatch):
     """reping defaults to False — the response shape must stay exactly what
     it was before reping existed, no new keys even present."""

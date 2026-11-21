@@ -24,4 +24,8 @@ jobs:
     uses: tekflox/aw-marketplace/.github/workflows/app-release.yml@master
     with:
       bump: ${{ inputs.bump || '' }}
-    secrets: inherit
+    # Explicit mapping: secrets: inherit does not cross owners (caller is a personal
+    # account, the called workflow lives in tekflox/), so it delivered an empty token.
+    secrets:
+      MARKETPLACE_SYNC_TOKEN: ${{ secrets.MARKETPLACE_SYNC_TOKEN }}
+      SKILLS_SYNC_TOKEN: ${{ secrets.SKILLS_SYNC_TOKEN }}
